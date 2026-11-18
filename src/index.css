@@ -1,0 +1,61 @@
+@import "tailwindcss";
+
+@layer base {
+  html,
+  body,
+  #root {
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    background-color: #0d1310;
+    font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+@keyframes kivu-edge-pulse {
+  0% {
+    opacity: 0.42;
+    transform: scale(1.03);
+  }
+  18% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  34% {
+    opacity: 0.62;
+    transform: scale(1.015);
+  }
+  48% {
+    opacity: 0.92;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0.42;
+    transform: scale(1.03);
+  }
+}
+
+@keyframes kivu-regen-shimmer {
+  0%, 100% {
+    opacity: 0.25;
+  }
+  50% {
+    opacity: 0.65;
+  }
+}
+
+.animate-kivu-edge-pulse {
+  animation-name: kivu-edge-pulse;
+  animation-timing-function: ease-in-out;
+  animation-iteration-count: infinite;
+}
+
+.animate-kivu-regen {
+  animation: kivu-regen-shimmer 1.1s ease-in-out infinite;
+}

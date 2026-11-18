@@ -1,0 +1,6 @@
+{
+  "name": "Kivu : Ligne de Front",
+  "description": "Jeu de tir tactique 3D (FPS) inspiré des forêts et vallées fluviales de l'est de la RDC, opposant l'Armée Régulière et les Forces Rebelles avec balistique et physique réalistes.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
