@@ -11,6 +11,7 @@ import { ProceduralTexturePack } from './textures';
 import {
   ColliderBox,
   ColliderCylinder,
+  CoverNode,
   ExplosiveBarrel,
   SectorState,
 } from './types';
@@ -21,6 +22,7 @@ export interface WorldBuildResult {
   barrels: ExplosiveBarrel[];
   sectors: SectorState[];
   coverPoints: THREE.Vector3[];
+  coverNodes: CoverNode[];
   updateWorld: (elapsed: number, sectors: SectorState[], windStrength?: number) => void;
 }
 
@@ -84,6 +86,45 @@ function registerOrientedBoxCollider(
   });
 }
 
+function registerWallCoverNodes(
+  coverNodes: CoverNode[] | undefined,
+  idPrefix: string,
+  x: number,
+  z: number,
+  rotY: number,
+  length: number,
+  offsetDist: number,
+  kind: CoverNode['kind'],
+  recommendedStance: CoverNode['recommendedStance']
+) {
+  if (!coverNodes) return;
+  const cos = Math.cos(rotY);
+  const sin = Math.sin(rotY);
+  const slots = length >= 4.0 ? [-length * 0.24, length * 0.24] : [0];
+  for (let si = 0; si < slots.length; si++) {
+    const lx = slots[si];
+    for (const side of [-1, 1] as const) {
+      const cx = x + lx * cos + side * offsetDist * sin;
+      const cz = z - lx * sin + side * offsetDist * cos;
+      const cy = groundHeightAt(cx, cz);
+      if (cy < WATER_LEVEL - 0.08) continue;
+      // Normal pointing from soldier through cover toward enemy on the opposite side
+      const faceX = -side * sin;
+      const faceZ = -side * cos;
+      coverNodes.push({
+        id: `${idPrefix}_${si}_${side > 0 ? 'p' : 'n'}`,
+        x: cx,
+        y: cy,
+        z: cz,
+        faceX,
+        faceZ,
+        kind,
+        recommendedStance,
+      });
+    }
+  }
+}
+
 function buildSandbagWall(
   x: number,
   z: number,
@@ -93,7 +134,8 @@ function buildSandbagWall(
   tex: ProceduralTexturePack,
   scene: THREE.Scene,
   boxes: ColliderBox[],
-  idPrefix: string
+  idPrefix: string,
+  coverNodes?: CoverNode[]
 ) {
   const group = new THREE.Group();
   const baseY = groundHeightAt(x, z);
@@ -152,6 +194,17 @@ function buildSandbagWall(
     'sandbag',
     false
   );
+  registerWallCoverNodes(
+    coverNodes,
+    idPrefix,
+    x,
+    z,
+    rotY,
+    length,
+    1.02,
+    'sandbag',
+    rows <= 2 ? 'prone' : 'crouch'
+  );
 }
 
 function buildConcreteBarrier(
@@ -161,7 +214,8 @@ function buildConcreteBarrier(
   tex: ProceduralTexturePack,
   scene: THREE.Scene,
   boxes: ColliderBox[],
-  id: string
+  id: string,
+  coverNodes?: CoverNode[]
 ) {
   const g = new THREE.Group();
   const baseY = groundHeightAt(x, z);
@@ -187,6 +241,7 @@ function buildConcreteBarrier(
   scene.add(g);
 
   registerOrientedBoxCollider(boxes, id, x, z, 1.4, 0.36, baseY - 0.5, baseY + 1.15, rotY, 'rock', false);
+  registerWallCoverNodes(coverNodes, id, x, z, rotY, 2.8, 1.05, 'barrier', 'crouch');
 }
 
 function buildMilitaryPickup(
@@ -1467,7 +1522,8 @@ function buildArtilleryBattery(
   z: number,
   tex: ProceduralTexturePack,
   scene: THREE.Scene,
-  boxes: ColliderBox[]
+  boxes: ColliderBox[],
+  coverNodes?: CoverNode[]
 ) {
   const steelMat = new THREE.MeshStandardMaterial({ map: tex.brushedSteel, roughness: 0.45, metalness: 0.7 });
   const offsets: [number, number][] = [
@@ -1495,7 +1551,7 @@ function buildArtilleryBattery(
     g.add(carriage, shield, barrel);
     scene.add(g);
 
-    buildSandbagWall(gx, gz - 2.6, 0, 4.4, 3, tex, scene, boxes, `artillery_sb_${idx}`);
+    buildSandbagWall(gx, gz - 2.6, 0, 4.4, 3, tex, scene, boxes, `artillery_sb_${idx}`, coverNodes);
     boxes.push({
       id: `artillery_gun_${idx}`,
       minX: gx - 1.1,
@@ -1863,6 +1919,7 @@ export function buildWorldEnvironment(
   const cylinderColliders: ColliderCylinder[] = [];
   const barrels: ExplosiveBarrel[] = [];
   const coverPoints: THREE.Vector3[] = [];
+  const coverNodes: CoverNode[] = [];
   const rand = seededRand(20261117);
 
   // 1. All 3 Tactical Bridges spanning the Kivu River (-76, 0, +78)
@@ -1870,89 +1927,159 @@ export function buildWorldEnvironment(
   buildCentralTimberBridge(0, textures, scene, boxColliders);
   buildEastPontoonBridge(78, textures, scene, boxColliders);
 
-  // 2. Build Landmarks & Tactical Cover across all 24 Zones!
+  // 2. Build Landmarks & Dense Tactical Sandbag Fortifications across all 24 Zones
   // South Bank Zones (10)
   buildCommandShelter(-10, 108, 0.15, 'army', textures, scene, boxColliders); // Z1 QG Armée Sud
   buildMilitaryPickup(-2, 102, 0.42, textures, scene, boxColliders, 'qg_pickup');
-  buildSandbagWall(-10, 96, 0.05, 5.2, 3, textures, scene, boxColliders, 'sb_qg_front');
+  buildSandbagWall(-10, 96, 0.05, 5.4, 3, textures, scene, boxColliders, 'sb_qg_front', coverNodes);
+  buildSandbagWall(-18, 92, 0.35, 4.4, 3, textures, scene, boxColliders, 'sb_qg_flank_w', coverNodes);
+  buildSandbagWall(4, 90, -0.25, 4.4, 3, textures, scene, boxColliders, 'sb_qg_flank_e', coverNodes);
 
   buildHelipadAndUtilityChopper(44, 112, textures, scene, boxColliders); // Z2 Héliport du Kivu
+  buildSandbagWall(34, 104, 0.3, 4.6, 3, textures, scene, boxColliders, 'sb_helipad_w', coverNodes);
+  buildSandbagWall(53, 102, -0.28, 4.4, 3, textures, scene, boxColliders, 'sb_helipad_e', coverNodes);
+
   buildFuelSilosAndDepot(-74, 96, textures, scene, cylinderColliders, boxColliders); // Z3 Dépôt Carburant Sud
-  buildSandbagWall(-116, 84, 0.35, 4.4, 3, textures, scene, boxColliders, 'sb_ravin_o'); // Z4 Ravin Basaltique Ouest
-  buildArtilleryBattery(96, 94, textures, scene, boxColliders); // Z5 Batterie d'Artillerie Est
+  buildSandbagWall(-66, 86, 0.22, 4.4, 3, textures, scene, boxColliders, 'sb_depot_front', coverNodes);
+  buildSandbagWall(-81, 88, -0.3, 4.0, 3, textures, scene, boxColliders, 'sb_depot_w', coverNodes);
+
+  buildSandbagWall(-116, 84, 0.35, 4.4, 3, textures, scene, boxColliders, 'sb_ravin_o', coverNodes); // Z4 Ravin Basaltique Ouest
+  buildSandbagWall(-105, 76, -0.22, 4.0, 2, textures, scene, boxColliders, 'sb_ravin_low', coverNodes);
+
+  buildArtilleryBattery(96, 94, textures, scene, boxColliders, coverNodes); // Z5 Batterie d'Artillerie Est
+  buildSandbagWall(86, 82, 0.18, 4.6, 3, textures, scene, boxColliders, 'sb_artillery_front', coverNodes);
 
   buildFishermanStiltVillage(-112, 48, textures, scene, boxColliders); // Z6 Village de Pêcheurs
-  buildSandbagWall(-50, 44, 0.25, 5.0, 3, textures, scene, boxColliders, 'sb_tranchee_1'); // Z7 Tranchées SO
-  buildSandbagWall(-46, 52, -0.25, 4.6, 3, textures, scene, boxColliders, 'sb_tranchee_2');
-  buildMarketStalls(12, 52, textures, scene, boxColliders); // Z8 Marché du Carrefour
-  buildTeaPlantationHedges(68, 66, textures, scene, boxColliders); // Z9 Plantation de Thé
-  buildSawmillLogStacks(118, 42, textures, scene, boxColliders); // Z10 Scierie Forestière
+  buildSandbagWall(-102, 42, 0.45, 4.2, 3, textures, scene, boxColliders, 'sb_village_peche_e', coverNodes);
+  buildSandbagWall(-114, 34, -0.15, 4.0, 3, textures, scene, boxColliders, 'sb_village_peche_n', coverNodes);
 
-  // River Line Approach Defenses (7 Zones)
-  buildSandbagWall(-4.2, 22.5, 0.15, 4.4, 3, textures, scene, boxColliders, 'sb_army_bridge_w');
-  buildSandbagWall(5.2, 21.8, -0.2, 4.0, 3, textures, scene, boxColliders, 'sb_army_bridge_e');
-  buildSandbagWall(-76, riverCenterZ(-76) + 16.5, 0.12, 4.0, 3, textures, scene, boxColliders, 'sb_west_bridge_s');
-  buildSandbagWall(-76, riverCenterZ(-76) - 16.5, -0.12, 4.0, 3, textures, scene, boxColliders, 'sb_west_bridge_n');
-  buildSandbagWall(78, riverCenterZ(78) + 16.5, -0.12, 4.0, 3, textures, scene, boxColliders, 'sb_east_bridge_s');
-  buildSandbagWall(78, riverCenterZ(78) - 16.5, 0.12, 4.0, 3, textures, scene, boxColliders, 'sb_east_bridge_n');
-  buildSandbagWall(-37.0, 16.5, 0.1, 3.5, 3, textures, scene, boxColliders, 'sb_ford_w_s');
-  buildSandbagWall(-39.5, -18.0, -0.15, 3.5, 3, textures, scene, boxColliders, 'sb_ford_w_n');
-  buildSandbagWall(37.5, 16.0, -0.1, 3.5, 3, textures, scene, boxColliders, 'sb_ford_e_s');
-  buildSandbagWall(39.0, -17.5, 0.15, 3.5, 3, textures, scene, boxColliders, 'sb_ford_e_n');
+  // Z7 Tranchées SO & Forward Firing Line
+  buildSandbagWall(-50, 44, 0.25, 5.2, 3, textures, scene, boxColliders, 'sb_tranchee_1', coverNodes);
+  buildSandbagWall(-46, 52, -0.25, 4.8, 3, textures, scene, boxColliders, 'sb_tranchee_2', coverNodes);
+  buildSandbagWall(-58, 34, 0.18, 4.6, 3, textures, scene, boxColliders, 'sb_tranchee_3', coverNodes);
+  buildSandbagWall(-36, 38, -0.22, 4.4, 2, textures, scene, boxColliders, 'sb_tranchee_berm', coverNodes);
+
+  // Z8 Marché du Carrefour (Secteur A) & Route Centrale
+  buildMarketStalls(12, 52, textures, scene, boxColliders);
+  buildSandbagWall(4, 42, 0.12, 4.8, 3, textures, scene, boxColliders, 'sb_marche_nw', coverNodes);
+  buildSandbagWall(20, 44, -0.2, 4.6, 3, textures, scene, boxColliders, 'sb_marche_ne', coverNodes);
+  buildSandbagWall(12, 62, 0.04, 5.0, 3, textures, scene, boxColliders, 'sb_marche_s', coverNodes);
+  buildSandbagWall(-14, 58, 0.35, 4.4, 3, textures, scene, boxColliders, 'sb_route_s_w', coverNodes);
+  buildSandbagWall(-9, 36, -0.14, 4.6, 3, textures, scene, boxColliders, 'sb_route_mid_w', coverNodes);
+  buildSandbagWall(9, 32, 0.18, 4.4, 3, textures, scene, boxColliders, 'sb_route_mid_e', coverNodes);
+
+  // Z9 Plantation de Thé & Z10 Scierie Forestière
+  buildTeaPlantationHedges(68, 66, textures, scene, boxColliders);
+  buildSandbagWall(58, 54, 0.24, 4.6, 3, textures, scene, boxColliders, 'sb_tea_nw', coverNodes);
+  buildSandbagWall(76, 52, -0.18, 4.4, 3, textures, scene, boxColliders, 'sb_tea_ne', coverNodes);
+  buildSandbagWall(44, 64, 0.38, 4.2, 3, textures, scene, boxColliders, 'sb_tea_approach', coverNodes);
+
+  buildSawmillLogStacks(118, 42, textures, scene, boxColliders);
+  buildSandbagWall(106, 34, 0.32, 4.4, 3, textures, scene, boxColliders, 'sb_sawmill_w', coverNodes);
+  buildSandbagWall(116, 26, -0.12, 4.2, 3, textures, scene, boxColliders, 'sb_sawmill_n', coverNodes);
+
+  // River Line Approach Defenses & Crossings (Both Banks)
+  buildSandbagWall(-4.2, 22.5, 0.15, 4.6, 3, textures, scene, boxColliders, 'sb_army_bridge_w', coverNodes);
+  buildSandbagWall(5.2, 21.8, -0.2, 4.4, 3, textures, scene, boxColliders, 'sb_army_bridge_e', coverNodes);
+  buildSandbagWall(-16.0, 20.0, 0.28, 4.4, 3, textures, scene, boxColliders, 'sb_river_s_center_w', coverNodes);
+  buildSandbagWall(18.0, 19.5, -0.24, 4.4, 3, textures, scene, boxColliders, 'sb_river_s_center_e', coverNodes);
+
+  buildSandbagWall(-76, riverCenterZ(-76) + 16.5, 0.12, 4.4, 3, textures, scene, boxColliders, 'sb_west_bridge_s', coverNodes);
+  buildSandbagWall(-84, riverCenterZ(-76) + 19.0, 0.35, 4.0, 3, textures, scene, boxColliders, 'sb_west_bridge_sw', coverNodes);
+  buildSandbagWall(-68, riverCenterZ(-76) + 19.0, -0.32, 4.0, 3, textures, scene, boxColliders, 'sb_west_bridge_se', coverNodes);
+  buildSandbagWall(-76, riverCenterZ(-76) - 16.5, -0.12, 4.4, 3, textures, scene, boxColliders, 'sb_west_bridge_n', coverNodes);
+  buildSandbagWall(-84, riverCenterZ(-76) - 19.5, -0.3, 4.0, 3, textures, scene, boxColliders, 'sb_west_bridge_nw', coverNodes);
+  buildSandbagWall(-68, riverCenterZ(-76) - 19.5, 0.32, 4.0, 3, textures, scene, boxColliders, 'sb_west_bridge_ne', coverNodes);
+
+  buildSandbagWall(78, riverCenterZ(78) + 16.5, -0.12, 4.4, 3, textures, scene, boxColliders, 'sb_east_bridge_s', coverNodes);
+  buildSandbagWall(70, riverCenterZ(78) + 19.5, 0.28, 4.0, 3, textures, scene, boxColliders, 'sb_east_bridge_sw', coverNodes);
+  buildSandbagWall(86, riverCenterZ(78) + 19.5, -0.28, 4.0, 3, textures, scene, boxColliders, 'sb_east_bridge_se', coverNodes);
+  buildSandbagWall(78, riverCenterZ(78) - 16.5, 0.12, 4.4, 3, textures, scene, boxColliders, 'sb_east_bridge_n', coverNodes);
+  buildSandbagWall(70, riverCenterZ(78) - 19.5, -0.28, 4.0, 3, textures, scene, boxColliders, 'sb_east_bridge_nw', coverNodes);
+  buildSandbagWall(86, riverCenterZ(78) - 19.5, 0.28, 4.0, 3, textures, scene, boxColliders, 'sb_east_bridge_ne', coverNodes);
+
+  buildSandbagWall(-37.0, 16.5, 0.1, 4.0, 3, textures, scene, boxColliders, 'sb_ford_w_s', coverNodes);
+  buildSandbagWall(-39.5, -18.0, -0.15, 4.0, 3, textures, scene, boxColliders, 'sb_ford_w_n', coverNodes);
+  buildSandbagWall(37.5, 16.0, -0.1, 4.0, 3, textures, scene, boxColliders, 'sb_ford_e_s', coverNodes);
+  buildSandbagWall(39.0, -17.5, 0.15, 4.0, 3, textures, scene, boxColliders, 'sb_ford_e_n', coverNodes);
+  buildSandbagWall(-56.0, 18.0, 0.18, 4.2, 2, textures, scene, boxColliders, 'sb_bank_sw_berm', coverNodes);
+  buildSandbagWall(56.0, -18.5, -0.18, 4.2, 2, textures, scene, boxColliders, 'sb_bank_ne_berm', coverNodes);
+
   buildCrateCluster(22, 2, 0.4, textures, scene, boxColliders, 'crates_river_islet'); // Z14 Îlot Fluvial
+  buildSandbagWall(21, 5.2, 0.25, 3.4, 2, textures, scene, boxColliders, 'sb_islet_s', coverNodes);
   buildPumpStationAndPipes(118, -8, textures, scene, boxColliders); // Z17 Station de Pompage
+  buildSandbagWall(108, -14, 0.3, 4.2, 3, textures, scene, boxColliders, 'sb_pump_w', coverNodes);
 
   // North Bank Zones (7)
   buildMissionRuins(-66, -54, textures, scene, boxColliders); // Z18 Ruines de la Mission
-  buildConcreteBarrier(-114, -66, 0.15, textures, scene, boxColliders, 'douane_bar_1'); // Z19 Poste Douanier NO
-  buildConcreteBarrier(-118, -70, -0.2, textures, scene, boxColliders, 'douane_bar_2');
-  buildWatchtower(-112, -72, 0.3, textures, scene, boxColliders);
-  buildWatchtower(42, -48, -0.35, textures, scene, boxColliders); // Z20 Mirador de la Crête
-  buildSandbagWall(40, -41, 0.2, 4.4, 3, textures, scene, boxColliders, 'sb_mirador');
-  buildWarehouse(-16, -74, 0.1, textures, scene, boxColliders, 'ammo_wh'); // Z21 Entrepôt de Munitions
-  buildCrateCluster(-16, -72, 0.35, textures, scene, boxColliders, 'ammo_crates_in');
-  buildCrateCluster(80, -80, 0.6, textures, scene, boxColliders, 'quarry_crates'); // Z22 Carrière de Latérite
-  buildConcreteBarrier(77, -76, 0.4, textures, scene, boxColliders, 'quarry_bar');
-  buildCommandShelter(10, -108, Math.PI - 0.15, 'rebels', textures, scene, boxColliders); // Z23 Campement Rebelle Nord
-  buildWatchtower(19, -104, Math.PI, textures, scene, boxColliders);
-  buildRadioRelayMast(118, -110, textures, scene, boxColliders); // Z24 Relais Radio Colline Nord
+  buildSandbagWall(-56, -42, 0.25, 4.6, 3, textures, scene, boxColliders, 'sb_ruins_se', coverNodes);
+  buildSandbagWall(-74, -44, -0.22, 4.4, 3, textures, scene, boxColliders, 'sb_ruins_sw', coverNodes);
+  buildSandbagWall(-64, -64, 0.08, 4.4, 3, textures, scene, boxColliders, 'sb_ruins_n', coverNodes);
 
-  // Forward Bridgehead Crates & Cover
-  buildSandbagWall(-5.2, -21.5, -0.18, 4.2, 3, textures, scene, boxColliders, 'sb_rebel_bridge_w');
-  buildSandbagWall(4.8, -22.2, 0.22, 4.2, 3, textures, scene, boxColliders, 'sb_rebel_bridge_e');
+  buildConcreteBarrier(-114, -66, 0.15, textures, scene, boxColliders, 'douane_bar_1', coverNodes); // Z19 Poste Douanier NO
+  buildConcreteBarrier(-118, -70, -0.2, textures, scene, boxColliders, 'douane_bar_2', coverNodes);
+  buildSandbagWall(-106, -58, 0.28, 4.6, 3, textures, scene, boxColliders, 'sb_douane_front', coverNodes);
+  buildWatchtower(-112, -72, 0.3, textures, scene, boxColliders);
+
+  buildWatchtower(42, -48, -0.35, textures, scene, boxColliders); // Z20 Mirador de la Crête
+  buildSandbagWall(40, -41, 0.2, 4.8, 3, textures, scene, boxColliders, 'sb_mirador', coverNodes);
+  buildSandbagWall(50, -34, -0.28, 4.4, 3, textures, scene, boxColliders, 'sb_mirador_e', coverNodes);
+  buildSandbagWall(26, -34, 0.22, 4.4, 3, textures, scene, boxColliders, 'sb_mirador_w', coverNodes);
+
+  buildWarehouse(-16, -74, 0.1, textures, scene, boxColliders, 'ammo_wh'); // Z21 Entrepôt de Munitions (Secteur E)
+  buildCrateCluster(-16, -72, 0.35, textures, scene, boxColliders, 'ammo_crates_in');
+  buildSandbagWall(-8, -62, 0.14, 5.0, 3, textures, scene, boxColliders, 'sb_ammo_se', coverNodes);
+  buildSandbagWall(-24, -63, -0.18, 4.8, 3, textures, scene, boxColliders, 'sb_ammo_sw', coverNodes);
+  buildSandbagWall(-16, -86, 0.05, 5.0, 3, textures, scene, boxColliders, 'sb_ammo_n', coverNodes);
+
+  buildCrateCluster(80, -80, 0.6, textures, scene, boxColliders, 'quarry_crates'); // Z22 Carrière de Latérite
+  buildConcreteBarrier(77, -76, 0.4, textures, scene, boxColliders, 'quarry_bar', coverNodes);
+  buildSandbagWall(84, -68, -0.22, 4.6, 3, textures, scene, boxColliders, 'sb_quarry_s', coverNodes);
+  buildSandbagWall(70, -70, 0.26, 4.2, 3, textures, scene, boxColliders, 'sb_quarry_w', coverNodes);
+
+  buildCommandShelter(10, -108, Math.PI - 0.15, 'rebels', textures, scene, boxColliders); // Z23 Campement Rebelle Nord
+  buildSandbagWall(10, -95, -0.08, 5.4, 3, textures, scene, boxColliders, 'sb_rebel_qg_front', coverNodes);
+  buildSandbagWall(20, -92, 0.28, 4.4, 3, textures, scene, boxColliders, 'sb_rebel_qg_e', coverNodes);
+  buildSandbagWall(-2, -92, -0.24, 4.4, 3, textures, scene, boxColliders, 'sb_rebel_qg_w', coverNodes);
+  buildWatchtower(19, -104, Math.PI, textures, scene, boxColliders);
+
+  buildRadioRelayMast(118, -110, textures, scene, boxColliders); // Z24 Relais Radio Colline Nord
+  buildSandbagWall(110, -100, 0.35, 4.4, 3, textures, scene, boxColliders, 'sb_relay_sw', coverNodes);
+
+  // Forward Bridgehead & Mid-Valley Sandbag Lines
+  buildSandbagWall(-5.2, -21.5, -0.18, 4.6, 3, textures, scene, boxColliders, 'sb_rebel_bridge_w', coverNodes);
+  buildSandbagWall(4.8, -22.2, 0.22, 4.6, 3, textures, scene, boxColliders, 'sb_rebel_bridge_e', coverNodes);
+  buildSandbagWall(-17.5, -21.0, -0.25, 4.4, 3, textures, scene, boxColliders, 'sb_river_n_center_w', coverNodes);
+  buildSandbagWall(16.5, -20.5, 0.24, 4.4, 3, textures, scene, boxColliders, 'sb_river_n_center_e', coverNodes);
+  buildSandbagWall(-6.5, -42.0, -0.15, 4.8, 3, textures, scene, boxColliders, 'sb_rebel_road_1', coverNodes);
+  buildSandbagWall(7.5, -46.0, 0.2, 4.4, 3, textures, scene, boxColliders, 'sb_rebel_road_2', coverNodes);
+  buildSandbagWall(-22.0, -40.0, 0.3, 4.2, 2, textures, scene, boxColliders, 'sb_rebel_ridge_w', coverNodes);
+
   buildCrateCluster(-6.0, 34.0, 0.5, textures, scene, boxColliders, 'crates_army_1');
   buildCrateCluster(-11.0, -36.0, 0.2, textures, scene, boxColliders, 'crates_rebel_1');
 
-  // Register AI Tactical Cover Points across the expanded valley
-  const tacticalCoverCoords: [number, number][] = [
-    [-4.2, 24.5],
-    [5.2, 23.8],
-    [-10, 98],
-    [42, 108],
-    [-72, 92],
-    [-114, 82],
-    [94, 90],
-    [-110, 46],
-    [-48, 47],
-    [12, 50],
-    [66, 62],
-    [116, 40],
-    [-76, 18],
-    [78, 18],
-    [-37.0, 18.5],
-    [37.5, 18.0],
-    [-5.2, -23.5],
-    [4.8, -24.2],
-    [-66, -50],
-    [-114, -64],
-    [42, -43],
-    [-16, -70],
-    [80, -76],
-    [10, -102],
-    [116, -106],
+  // Register coverNodes into legacy coverPoints as well for compatibility
+  for (const cn of coverNodes) {
+    coverPoints.push(new THREE.Vector3(cn.x, cn.y, cn.z));
+  }
+  const extraCoverCoords: [number, number][] = [
+    [-6.0, 36.2],
+    [-11.0, -33.8],
+    [22.0, -0.4],
   ];
-  for (const [cx, cz] of tacticalCoverCoords) {
-    coverPoints.push(new THREE.Vector3(cx, groundHeightAt(cx, cz), cz));
+  for (const [cx, cz] of extraCoverCoords) {
+    const cy = groundHeightAt(cx, cz);
+    coverPoints.push(new THREE.Vector3(cx, cy, cz));
+    coverNodes.push({
+      id: `crate_pt_${cx}_${cz}`,
+      x: cx,
+      y: cy,
+      z: cz,
+      faceX: 0,
+      faceZ: cz > 0 ? -1 : 1,
+      kind: 'crate',
+      recommendedStance: 'crouch',
+    });
   }
 
   // 3. Explosive Fuel Drums across industrial & crossing zones
@@ -2158,7 +2285,6 @@ export function buildWorldEnvironment(
     palmPositions.length
   );
   palmTrunkInst.castShadow = true;
-  palmFrondInst.castShadow = true;
 
   palmPositions.forEach((pp, idx) => {
     const gy = groundHeightAt(pp.x, pp.z);
@@ -2351,6 +2477,7 @@ export function buildWorldEnvironment(
     barrels,
     sectors,
     coverPoints,
+    coverNodes,
     updateWorld: (elapsed: number, activeSectors: SectorState[], windStrength = 1.0) => {
       grassUniforms.uTime.value = elapsed;
       grassUniforms.uWind.value = THREE.MathUtils.clamp(0.75 + windStrength * 0.28, 0.7, 2.2);

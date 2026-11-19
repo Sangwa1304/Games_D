@@ -1,12 +1,13 @@
-import { GamepadSettings, StickCurveType } from './types';
+import { GamepadMenuEvent, GamepadSettings, StickCurveType } from './types';
 
 export const DEFAULT_GAMEPAD_SETTINGS: GamepadSettings = {
+  enabled: true,
   lookSensitivity: 2.85,
   adsMultiplier: 0.58,
   stickCurve: 'dynamic',
   moveDeadzone: 0.06,
   lookDeadzone: 0.07,
-  autoSprint: true,
+  autoSprint: false,
   invertY: false,
   vibration: true,
 };
@@ -23,12 +24,15 @@ export interface DualShockState {
   fireHeld: boolean; // R2 (7)
   fireJustPressed: boolean; // R2 edge
   jumpJustPressed: boolean; // Croix (0)
+  jumpHeld: boolean; // Croix maintenu
   crouchJustPressed: boolean; // Rond court (1) -> Accroupi / Glissade en sprint
+  crouchHeld: boolean; // Rond maintenu
   proneJustPressed: boolean; // Rond long (1) -> Allongé / Plongeon en sprint
   diveOrProneJustPressed: boolean; // R3 (11) -> Allongé immédiat / Plongeon en sprint
   reloadJustPressed: boolean; // Carré (2)
   nextWeaponJustPressed: boolean; // Triangle (3)
-  prevWeaponJustPressed: boolean; // D-Pad Bas (13)
+  prevWeaponJustPressed: boolean; // D-Pad Bas court (13)
+  droneToggleJustPressed: boolean; // D-Pad Bas maintenu (13 >= 280ms) -> Drone Recon
   smokeJustPressed: boolean; // L1 (4) -> Fumigène tactique
   grenadeJustPressed: boolean; // R1 (5) -> Grenade Frag
   sprintHeld: boolean; // L3 (10) ou Auto-Sprint stick gauche
@@ -42,6 +46,7 @@ export interface DualShockState {
   toggleCommandPanelJustPressed: boolean; // Pavé tactile (17) ou Share long
   confirmJustPressed: boolean; // Croix sur menus
   switchCampJustPressed: boolean; // Share / D-Pad G-D sur menus
+  menuEvents: GamepadMenuEvent[]; // Événements de navigation UI (D-Pad + Stick G + L1/R1/✕/○/□/△/Options)
 }
 
 function applyRadialDeadzone(x: number, y: number, deadzone: number): [number, number] {
@@ -78,6 +83,10 @@ export class DualShockController {
   private shareLongHandled = false;
   private circlePressTime = 0;
   private circleLongHandled = false;
+  private dpadDownPressTime = 0;
+  private dpadDownLongHandled = false;
+  private navHoldDir: 'up' | 'down' | 'left' | 'right' | null = null;
+  private navNextRepeatAt = 0;
   private activePadIndex: number | null = null;
   private settings: GamepadSettings = { ...DEFAULT_GAMEPAD_SETTINGS };
   public connected = false;
@@ -98,6 +107,11 @@ export class DualShockController {
 
   public getSettings(): GamepadSettings {
     return { ...this.settings };
+  }
+
+  public clearSprintLatch() {
+    this.sprintLatched = false;
+    this.tacSprintLatched = false;
   }
 
   private onConnected = (e: GamepadEvent) => {
@@ -163,12 +177,15 @@ export class DualShockController {
       fireHeld: false,
       fireJustPressed: false,
       jumpJustPressed: false,
+      jumpHeld: false,
       crouchJustPressed: false,
+      crouchHeld: false,
       proneJustPressed: false,
       diveOrProneJustPressed: false,
       reloadJustPressed: false,
       nextWeaponJustPressed: false,
       prevWeaponJustPressed: false,
+      droneToggleJustPressed: false,
       smokeJustPressed: false,
       grenadeJustPressed: false,
       sprintHeld: false,
@@ -182,6 +199,7 @@ export class DualShockController {
       toggleCommandPanelJustPressed: false,
       confirmJustPressed: false,
       switchCampJustPressed: false,
+      menuEvents: [],
     };
 
     if (!pad) return empty;
@@ -203,9 +221,10 @@ export class DualShockController {
     const r2Just = r2Held && !this.prevR2;
     const now = performance.now();
 
-    // L3 click toggles Sprint; double-tap L3 engages CoD Tactical Sprint.
-    // Auto-sprint also engages smooth sprint when left stick is pushed strongly forward.
-    if (justPressed(10)) {
+    // L3 click while pushing forward engages Sprint; double-click L3 forward engages Tactical Sprint.
+    // Normal forward stick without clicking L3 performs normal walking (standing, crouch, or prone).
+    const pushingForward = my < -0.25;
+    if (justPressed(10) && !l2Held && pushingForward) {
       if (now - this.lastL3Time < 340) {
         this.sprintLatched = true;
         this.tacSprintLatched = true;
@@ -216,7 +235,7 @@ export class DualShockController {
       this.lastL3Time = now;
     }
     const autoSprintActive = this.settings.autoSprint && my < -0.84 && !l2Held;
-    if (my > -0.22 || l2Held) {
+    if (!pushingForward || l2Held) {
       this.sprintLatched = false;
       this.tacSprintLatched = false;
     }
@@ -234,6 +253,21 @@ export class DualShockController {
       }
     } else if (this.prevButtons[1] && !this.circleLongHandled) {
       crouchTap = true;
+    }
+
+    // D-Pad Bas (13): Tap (< 280ms) -> Arme précédente; Hold (>= 280ms) -> Déployer/Rappeler Drone Recon
+    let dpadDownTap = false;
+    let droneHold = false;
+    if (btn(13)) {
+      if (!this.prevButtons[13]) {
+        this.dpadDownPressTime = now;
+        this.dpadDownLongHandled = false;
+      } else if (!this.dpadDownLongHandled && now - this.dpadDownPressTime >= 280) {
+        this.dpadDownLongHandled = true;
+        droneHold = true;
+      }
+    } else if (this.prevButtons[13] && !this.dpadDownLongHandled) {
+      dpadDownTap = true;
     }
 
     // Select/Share (8) toggles État; Touchpad (17) toggles Cross-Com Commandes
@@ -260,6 +294,48 @@ export class DualShockController {
     const curvedLookY =
       applyAimCurve(lyRaw, this.settings.stickCurve) * (this.settings.invertY ? -1 : 1);
 
+    // Directional UI navigation with smooth initial delay & fast horizontal slider repeat
+    const menuEvents: GamepadMenuEvent[] = [];
+    const dUp = btn(12);
+    const dDown = btn(13);
+    const dLeft = btn(14);
+    const dRight = btn(15);
+
+    let desiredDir: 'up' | 'down' | 'left' | 'right' | null = null;
+    if (dUp && !dDown) desiredDir = 'up';
+    else if (dDown && !dUp) desiredDir = 'down';
+    else if (dLeft && !dRight) desiredDir = 'left';
+    else if (dRight && !dLeft) desiredDir = 'right';
+    else if (Math.abs(rawLy) > 0.54 || Math.abs(rawLx) > 0.54) {
+      if (Math.abs(rawLy) >= Math.abs(rawLx)) {
+        desiredDir = rawLy < 0 ? 'up' : 'down';
+      } else {
+        desiredDir = rawLx < 0 ? 'left' : 'right';
+      }
+    }
+
+    if (desiredDir === null) {
+      this.navHoldDir = null;
+      this.navNextRepeatAt = 0;
+    } else if (desiredDir !== this.navHoldDir) {
+      this.navHoldDir = desiredDir;
+      const isHoriz = desiredDir === 'left' || desiredDir === 'right';
+      this.navNextRepeatAt = now + (isHoriz ? 240 : 300);
+      menuEvents.push({ action: desiredDir, isRepeat: false });
+    } else if (now >= this.navNextRepeatAt) {
+      const isHoriz = desiredDir === 'left' || desiredDir === 'right';
+      this.navNextRepeatAt = now + (isHoriz ? 62 : 105);
+      menuEvents.push({ action: desiredDir, isRepeat: true });
+    }
+
+    if (justPressed(4)) menuEvents.push({ action: 'tabPrev', isRepeat: false }); // L1
+    if (justPressed(5)) menuEvents.push({ action: 'tabNext', isRepeat: false }); // R1
+    if (justPressed(0)) menuEvents.push({ action: 'confirm', isRepeat: false }); // Croix
+    if (justPressed(1)) menuEvents.push({ action: 'back', isRepeat: false }); // Rond
+    if (justPressed(2)) menuEvents.push({ action: 'square', isRepeat: false }); // Carré
+    if (justPressed(3)) menuEvents.push({ action: 'triangle', isRepeat: false }); // Triangle
+    if (justPressed(9)) menuEvents.push({ action: 'options', isRepeat: false }); // Options
+
     const state: DualShockState = {
       connected: true,
       name: pad.id,
@@ -272,15 +348,18 @@ export class DualShockController {
       fireHeld: r2Held,
       fireJustPressed: r2Just,
       jumpJustPressed: justPressed(0), // Croix (X)
+      jumpHeld: btn(0),
       crouchJustPressed: crouchTap, // Rond court (O) -> Accroupi / Glissade
+      crouchHeld: btn(1),
       proneJustPressed: proneHold, // Rond maintenu (O) -> Allongé
       diveOrProneJustPressed: justPressed(11), // R3 -> Allongé / Plongeon immédiat
       reloadJustPressed: justPressed(2), // Carré (□)
       nextWeaponJustPressed: justPressed(3), // Triangle (△)
-      prevWeaponJustPressed: justPressed(13), // D-Pad Bas (↓)
+      prevWeaponJustPressed: dpadDownTap, // D-Pad Bas court (↓)
+      droneToggleJustPressed: droneHold, // D-Pad Bas maintenu (↓ long) -> Drone Recon
       smokeJustPressed: justPressed(4), // L1 -> Fumigène
       grenadeJustPressed: justPressed(5), // R1 -> Grenade Frag
-      sprintHeld: this.sprintLatched || btn(10) || autoSprintActive,
+      sprintHeld: this.sprintLatched || (btn(10) && pushingForward && !l2Held) || autoSprintActive,
       l3JustPressed: justPressed(10), // L3
       tacSprintHeld: this.tacSprintLatched,
       pauseJustPressed: justPressed(9), // Options
@@ -291,6 +370,7 @@ export class DualShockController {
       toggleCommandPanelJustPressed: toggleCommand, // Pavé Tactile (17)
       confirmJustPressed: justPressed(0), // Croix
       switchCampJustPressed: justPressed(8) || justPressed(14) || justPressed(15),
+      menuEvents,
     };
 
     for (let i = 0; i < Math.min(pad.buttons.length, 20); i++) {

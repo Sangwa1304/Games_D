@@ -407,15 +407,16 @@ export class EnvironmentParticleSystem {
         this.respawnLeafAround(lf, focusPos, wind);
       }
 
-      const gy = groundHeightAt(lf.x, lf.z);
-      const floorY = Math.max(gy, WATER_LEVEL) + 0.05;
-
       if (lf.settledTimer > 0) {
         lf.settledTimer -= dt;
         if (lf.settledTimer <= 0) {
           this.respawnLeafAround(lf, focusPos, wind);
+        } else {
+          continue;
         }
       } else {
+        const gy = groundHeightAt(lf.x, lf.z);
+        const floorY = Math.max(gy, WATER_LEVEL) + 0.05;
         const flutter = Math.sin(elapsed * 2.8 + lf.phase) * 0.85;
         const flutterZ = Math.cos(elapsed * 2.3 + lf.phase * 1.3) * 0.72;
         lf.vx = THREE.MathUtils.lerp(lf.vx, wind.x * 0.48 + flutter, dt * 1.6);

@@ -16,6 +16,7 @@ import {
   igniteSoldier,
   pickRouteToTarget,
   poseSoldierRig,
+  RemoteCombatTarget,
   SoldierEntity,
   spawnSoldier,
   triggerSoldierDive,
@@ -39,6 +40,8 @@ import { LanMultiplayerClient } from './network';
 import { getCombatModeSpec } from './modes';
 import { EnvironmentParticleSystem } from './particles';
 import {
+  hasDroneOpticLos,
+  hasLineOfSight,
   intersectSegmentEnvironment,
   PLAYER_EYE_CROUCH,
   PLAYER_EYE_PRONE,
@@ -63,6 +66,7 @@ import {
   ExplosiveBarrel,
   Faction,
   FriendlyFireTarget,
+  GamepadMenuEvent,
   GamepadSettings,
   GamePhase,
   HudSnapshot,
@@ -261,6 +265,8 @@ export class GameEngine {
   private speech = new SpeechCalloutSynthesizer();
   private dualShock = new DualShockController();
   private padState!: DualShockState;
+  private armoryOpen = false;
+  private menuNavListeners = new Set<(ev: GamepadMenuEvent) => void>();
   private voiceTestCursor = 0;
 
   private isSoftwareGl = false;
@@ -356,6 +362,17 @@ export class GameEngine {
   private playerDiveCooldown = 0;
   private playerDiveDir = new THREE.Vector3();
 
+  // Android / Mobile Touch & Viewport State
+  private isMobileDevice = false;
+  private isPortrait = false;
+  private isFullscreen = false;
+  private userExitedFullscreen = false;
+  private touchMoveX = 0;
+  private touchMoveY = 0;
+  private touchSprint = false;
+  private touchFireHeld = false;
+  private touchAdsHeld = false;
+
   // Weapons, 3-slot loadout & viewmodel
   private weaponAnchor = new THREE.Group();
   private viewmodels: Partial<Record<WeaponId, WeaponViewmodel>> = {};
@@ -408,6 +425,15 @@ export class GameEngine {
   }> = [];
   private nextShotIndicatorId = 1;
   private aimingAtAlly: FriendlyFireTarget | null = null;
+  private aimingAtEnemy = false;
+  private aimingEnemyDist: number | null = null;
+  private aimedEnemyRef: { key: string; pos: THREE.Vector3; name: string } | null = null;
+  private activeEliminateSubId: number | null = null;
+  private activeEliminateTargetKey: string | null = null;
+  private activeEliminateTargetName: string | null = null;
+  private scopeRangeMeters: number | null = null;
+  private scopeDropSvgUnits = 0;
+  private scopeDropTicks: Array<{ dist: number; ySvg: number }> = [];
   private friendlyFireWarnTimer = 0;
   private friendlyFireAudioCooldown = 0;
   private killcam!: KillcamSystem;
@@ -435,6 +461,23 @@ export class GameEngine {
   private orderXpCooldown = 0;
   private statusPanelOpen = false;
   private commandPanelOpen = false;
+
+  // Short-Range Tactical Recon Drone (Tom Clancy thicket spotter)
+  private droneActive = false;
+  private droneBattery = 100;
+  private readonly droneMaxRange = 95;
+  private dronePos = new THREE.Vector3();
+  private droneVel = new THREE.Vector3();
+  private droneYaw = 0;
+  private dronePitch = -0.35;
+  private droneGroup!: THREE.Group;
+  private droneRotors: THREE.Mesh[] = [];
+  private droneAimingEnemy = false;
+  private droneAimingEnemyName: string | null = null;
+  private droneAimingEnemyDist: number | null = null;
+  private droneClimbBurstTimer = 0;
+  private droneDescendBurstTimer = 0;
+  private droneScanAudioCooldown = 0;
 
   // LAN Wi-Fi Multiplayer & UDP Auto-Discovery
   private lan!: LanMultiplayerClient;
@@ -487,6 +530,7 @@ export class GameEngine {
           voiceVolume: number;
           sensitivity: number;
           muted: boolean;
+          manualSprintV2: boolean;
           gamepadSettings: Partial<GamepadSettings>;
         }>;
         if (typeof parsed.sfxVolume === 'number') this.sfxVolume = THREE.MathUtils.clamp(parsed.sfxVolume, 0, 1);
@@ -499,6 +543,8 @@ export class GameEngine {
         if (parsed.gamepadSettings && typeof parsed.gamepadSettings === 'object') {
           const g = parsed.gamepadSettings;
           this.gamepadSettings = {
+            enabled:
+              typeof g.enabled === 'boolean' ? g.enabled : DEFAULT_GAMEPAD_SETTINGS.enabled,
             lookSensitivity:
               typeof g.lookSensitivity === 'number'
                 ? THREE.MathUtils.clamp(g.lookSensitivity, 0.8, 5.2)
@@ -520,7 +566,9 @@ export class GameEngine {
                 ? THREE.MathUtils.clamp(g.lookDeadzone, 0.02, 0.25)
                 : DEFAULT_GAMEPAD_SETTINGS.lookDeadzone,
             autoSprint:
-              typeof g.autoSprint === 'boolean' ? g.autoSprint : DEFAULT_GAMEPAD_SETTINGS.autoSprint,
+              parsed.manualSprintV2 && typeof g.autoSprint === 'boolean'
+                ? g.autoSprint
+                : DEFAULT_GAMEPAD_SETTINGS.autoSprint,
             invertY:
               typeof g.invertY === 'boolean' ? g.invertY : DEFAULT_GAMEPAD_SETTINGS.invertY,
             vibration:
@@ -547,6 +595,22 @@ export class GameEngine {
     this.speech.setVolume(this.voiceVolume);
     this.audio.setMuted(this.audioMuted);
     this.speech.setMuted(this.audioMuted);
+    this.isMobileDevice = this.detectMobileDevice();
+    this.isPortrait = window.innerHeight > window.innerWidth;
+    this.isFullscreen = Boolean(document.fullscreenElement);
+    if (this.isMobileDevice) {
+      this.tryLockLandscape();
+    }
+  }
+
+  private detectMobileDevice(): boolean {
+    if (typeof window === 'undefined') return false;
+    const ua = navigator.userAgent || '';
+    if (/Android|iPhone|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua)) return true;
+    const hasTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+    const coarse = window.matchMedia?.('(pointer: coarse)')?.matches ?? false;
+    const smallScreen = Math.min(window.screen?.width || window.innerWidth, window.screen?.height || window.innerHeight) <= 950;
+    return hasTouch && coarse && smallScreen;
   }
 
   private createFreshWeaponInventory(): Record<WeaponId, { mag: number; reserve: number }> {
@@ -588,6 +652,7 @@ export class GameEngine {
           voiceVolume: this.voiceVolume,
           sensitivity: this.mouseSensitivity,
           muted: this.audioMuted,
+          manualSprintV2: true,
           gamepadSettings: this.gamepadSettings,
         })
       );
@@ -622,7 +687,7 @@ export class GameEngine {
     });
     this.renderer.setSize(w, h);
     this.renderer.setPixelRatio(
-      this.isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 2)
+      this.isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, this.isMobileDevice ? 1.25 : 1.5)
     );
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -653,10 +718,10 @@ export class GameEngine {
     this.sunLight = new THREE.DirectionalLight('#ffecd2', 1.85);
     this.sunLight.position.set(42, 62, 34);
     this.sunLight.castShadow = !this.isSoftwareGl;
-    this.sunLight.shadow.mapSize.set(1536, 1536);
+    this.sunLight.shadow.mapSize.set(1024, 1024);
     this.sunLight.shadow.camera.near = 5;
     this.sunLight.shadow.camera.far = 165;
-    const d = 64;
+    const d = 56;
     this.sunLight.shadow.camera.left = -d;
     this.sunLight.shadow.camera.right = d;
     this.sunLight.shadow.camera.top = d;
@@ -690,6 +755,7 @@ export class GameEngine {
       this.getViewmodel(this.playerLoadout[i]);
     }
     this.weaponAnchor.visible = false; // Hidden on title camera pan
+    this.initReconDrone();
 
     // Drifting morning river mist wisps
     for (let i = 0; i < 18; i++) {
@@ -1417,7 +1483,11 @@ export class GameEngine {
     this.resetMatch(faction);
     this.phase = 'playing';
     this.weaponAnchor.visible = true;
-    this.requestPointerLock();
+    if (this.isMobileDevice) {
+      this.requestFullscreenImmersive();
+    } else {
+      this.requestPointerLock();
+    }
     const spec = getCombatModeSpec(this.combatMode);
     this.pushRadioBanner(`${spec.name.toUpperCase()} · ${spec.objectiveLabel}`);
     this.syncHud();
@@ -1438,7 +1508,11 @@ export class GameEngine {
     this.resetMatch(faction);
     this.phase = 'playing';
     this.weaponAnchor.visible = true;
-    this.requestPointerLock();
+    if (this.isMobileDevice) {
+      this.requestFullscreenImmersive();
+    } else {
+      this.requestPointerLock();
+    }
     this.syncHud();
   }
 
@@ -1465,8 +1539,36 @@ export class GameEngine {
       this.phase = 'playing';
       this.weaponAnchor.visible =
         this.playerHp > 0 && !(isSniperWeapon(this.currentWeaponId) && this.adsAlpha > 0.78);
-      this.requestPointerLock();
+      if (this.isMobileDevice) {
+        this.requestFullscreenImmersive();
+      } else {
+        this.requestPointerLock();
+      }
       this.syncHud();
+    }
+  }
+
+  public setArmoryOpen(open: boolean) {
+    this.armoryOpen = open;
+  }
+
+  public isGamepadActive(): boolean {
+    return Boolean(this.padState?.connected && this.gamepadSettings.enabled);
+  }
+
+  public onGamepadMenuEvent(cb: (ev: GamepadMenuEvent) => void): () => void {
+    this.menuNavListeners.add(cb);
+    return () => {
+      this.menuNavListeners.delete(cb);
+    };
+  }
+
+  public rumbleMenu(strong = false) {
+    if (!this.isGamepadActive()) return;
+    if (strong) {
+      this.dualShock.rumble(0.18, 0.08, 40);
+    } else {
+      this.dualShock.rumble(0.08, 0.03, 22);
     }
   }
 
@@ -1630,10 +1732,211 @@ export class GameEngine {
   }
 
   public requestPointerLock() {
+    if (this.isMobileDevice) {
+      this.requestFullscreenImmersive();
+      return;
+    }
     try {
       this.renderer.domElement.requestPointerLock?.();
     } catch {
       // Ignore if blocked by browser gesture rules
+    }
+  }
+
+  private tryLockLandscape() {
+    try {
+      const orient = screen.orientation as ScreenOrientation & {
+        lock?: (orientation: string) => Promise<void>;
+      };
+      orient?.lock?.('landscape').catch(() => {});
+    } catch {
+      // Orientation lock may require fullscreen or Android browser context
+    }
+  }
+
+  public requestFullscreenImmersive() {
+    this.userExitedFullscreen = false;
+    try {
+      const rootEl = document.documentElement as HTMLElement & {
+        webkitRequestFullscreen?: () => Promise<void>;
+      };
+      if (!document.fullscreenElement) {
+        if (rootEl.requestFullscreen) {
+          rootEl
+            .requestFullscreen({ navigationUI: 'hide' })
+            .then(() => this.tryLockLandscape())
+            .catch(() => this.tryLockLandscape());
+        } else if (rootEl.webkitRequestFullscreen) {
+          Promise.resolve(rootEl.webkitRequestFullscreen())
+            .then(() => this.tryLockLandscape())
+            .catch(() => this.tryLockLandscape());
+        } else {
+          this.tryLockLandscape();
+        }
+      } else {
+        this.tryLockLandscape();
+      }
+      window.scrollTo(0, 1);
+    } catch {
+      // Fullscreen may require direct gesture on strict mobile browsers
+    }
+  }
+
+  public toggleFullscreen() {
+    try {
+      if (document.fullscreenElement) {
+        this.userExitedFullscreen = true;
+        document.exitFullscreen?.().catch(() => {});
+      } else {
+        this.requestFullscreenImmersive();
+      }
+    } catch {
+      // Ignore
+    }
+  }
+
+  public setTouchMove(x: number, y: number, sprint = false) {
+    this.touchMoveX = THREE.MathUtils.clamp(x, -1, 1);
+    this.touchMoveY = THREE.MathUtils.clamp(y, -1, 1);
+    this.touchSprint = sprint;
+  }
+
+  public addTouchLookDelta(dx: number, dy: number) {
+    if (this.phase !== 'playing' || this.playerHp <= 0) return;
+    this.audio.unlock();
+    if (this.droneActive) {
+      const droneSens = this.mouseSensitivity * 1.15;
+      this.droneYaw -= dx * droneSens;
+      this.dronePitch = THREE.MathUtils.clamp(this.dronePitch - dy * droneSens, -1.28, 0.28);
+      return;
+    }
+    const spec = WEAPON_SPECS[this.currentWeaponId];
+    const sniperAdsScale =
+      isSniperWeapon(this.currentWeaponId)
+        ? THREE.MathUtils.clamp(((spec.zoomFovs?.[this.sniperZoomIdx] ?? spec.adsFov) / 72) * 1.4, 0.16, 0.75)
+        : 1.0;
+    const adsScale = this.adsAlpha > 0.5 ? (isSniperWeapon(this.currentWeaponId) ? sniperAdsScale : 0.58) : 1.0;
+    const sens = this.mouseSensitivity * 1.35 * adsScale;
+    this.playerYaw -= dx * sens;
+    this.playerPitch = THREE.MathUtils.clamp(this.playerPitch - dy * sens, -1.42, 1.42);
+  }
+
+  public setTouchFire(held: boolean) {
+    if (held) this.audio.unlock();
+    if (this.droneActive) {
+      if (held) this.markEnemiesWithDrone();
+      return;
+    }
+    this.touchFireHeld = held;
+    if (!held) this.semiShotLocked = false;
+  }
+
+  public setTouchAds(active: boolean) {
+    this.audio.unlock();
+    this.touchAdsHeld = active;
+    this.syncHud();
+  }
+
+  public triggerTouchAction(
+    action:
+      | 'jump'
+      | 'crouch'
+      | 'prone'
+      | 'reload'
+      | 'nextWeapon'
+      | 'frag'
+      | 'smoke'
+      | 'zoom'
+      | 'pause'
+      | 'orderNext'
+      | 'orderIssue'
+      | 'drone'
+      | 'droneAscend'
+      | 'droneDescend'
+      | 'droneMark'
+  ) {
+    this.audio.unlock();
+    if (action === 'pause') {
+      if (this.phase === 'playing') {
+        if (this.droneActive) this.recallReconDrone(false);
+        this.phase = 'paused';
+        this.touchFireHeld = false;
+        this.touchAdsHeld = false;
+        this.touchMoveX = 0;
+        this.touchMoveY = 0;
+        this.exitPointerLock();
+        this.syncHud();
+      }
+      return;
+    }
+    if (this.phase !== 'playing' || this.playerHp <= 0) return;
+
+    switch (action) {
+      case 'drone':
+        this.toggleReconDrone();
+        break;
+      case 'droneAscend':
+        if (this.droneActive) this.droneClimbBurstTimer = 0.34;
+        break;
+      case 'droneDescend':
+        if (this.droneActive) this.droneDescendBurstTimer = 0.34;
+        break;
+      case 'droneMark':
+        if (this.droneActive) this.markEnemiesWithDrone();
+        break;
+      case 'jump':
+        if (this.droneActive) {
+          this.droneClimbBurstTimer = 0.34;
+          break;
+        }
+        if (this.playerSlideTimer > 0) {
+          this.playerSlideTimer = 0;
+          this.playerStance = 'stand';
+          this.jumpJustPressed = true;
+        } else if (this.playerStance !== 'stand') {
+          this.playerStance = 'stand';
+        } else {
+          this.jumpJustPressed = true;
+        }
+        break;
+      case 'crouch':
+        if (this.droneActive) {
+          this.droneDescendBurstTimer = 0.34;
+          break;
+        }
+        this.handleCrouchAction();
+        break;
+      case 'prone':
+        this.handleProneAction(true);
+        break;
+      case 'reload':
+        this.startReload();
+        break;
+      case 'nextWeapon':
+        if (this.playerLoadout.length > 1) {
+          const curIdx = Math.max(0, this.playerLoadout.indexOf(this.currentWeaponId));
+          this.switchWeapon(this.playerLoadout[(curIdx + 1) % this.playerLoadout.length]);
+        }
+        break;
+      case 'frag':
+        this.throwGrenade('frag');
+        break;
+      case 'smoke':
+        this.throwGrenade('smoke');
+        break;
+      case 'zoom':
+        if (isSniperWeapon(this.currentWeaponId)) {
+          this.sniperZoomIdx = this.sniperZoomIdx === 0 ? 1 : 0;
+          this.audio.playCommandChirp('ack');
+          this.syncHud();
+        }
+        break;
+      case 'orderNext':
+        this.cycleTacticalOrder();
+        break;
+      case 'orderIssue':
+        this.issueTacticalOrder(this.selectedOrder);
+        break;
     }
   }
 
@@ -1679,9 +1982,20 @@ export class GameEngine {
     this.activeOrderTimer = 0;
     this.orderAckTimer = 0;
     this.pendingAckOrder = null;
+    this.activeEliminateSubId = null;
+    this.activeEliminateTargetKey = null;
+    this.activeEliminateTargetName = null;
     this.orderMarkerTimer = 0;
     this.statusPanelOpen = false;
     this.commandPanelOpen = false;
+    this.droneActive = false;
+    this.droneBattery = 100;
+    this.droneAimingEnemy = false;
+    this.droneAimingEnemyName = null;
+    this.droneAimingEnemyDist = null;
+    this.droneClimbBurstTimer = 0;
+    this.droneDescendBurstTimer = 0;
+    if (this.droneGroup) this.droneGroup.visible = false;
     if (this.orderMarkerGroup) this.orderMarkerGroup.visible = false;
     this.commsFeed = [];
     this.globalCommsTimer = 0;
@@ -1753,6 +2067,19 @@ export class GameEngine {
     this.damageSourceWorld = null;
     this.shotIndicators = [];
     this.aimingAtAlly = null;
+    this.aimingAtEnemy = false;
+    this.aimingEnemyDist = null;
+    this.aimedEnemyRef = null;
+    this.droneActive = false;
+    this.droneAimingEnemy = false;
+    this.droneAimingEnemyName = null;
+    this.droneAimingEnemyDist = null;
+    this.droneClimbBurstTimer = 0;
+    this.droneDescendBurstTimer = 0;
+    if (this.droneGroup) this.droneGroup.visible = false;
+    this.scopeRangeMeters = null;
+    this.scopeDropSvgUnits = 0;
+    this.scopeDropTicks = [];
     this.friendlyFireWarnTimer = 0;
     this.isReloading = false;
     this.reloadTimer = 0;
@@ -1890,8 +2217,10 @@ export class GameEngine {
     const kbStrafe =
       (this.keys['KeyD'] || this.keys['ArrowRight'] ? 1 : 0) -
       (this.keys['KeyA'] || this.keys['KeyQ'] || this.keys['ArrowLeft'] ? 1 : 0);
-    const moveFwd = THREE.MathUtils.clamp(kbFwd - this.padState.moveY, -1, 1);
-    const moveStrafe = THREE.MathUtils.clamp(kbStrafe + this.padState.moveX, -1, 1);
+    const padMoveY = this.isGamepadActive() ? this.padState.moveY : 0;
+    const padMoveX = this.isGamepadActive() ? this.padState.moveX : 0;
+    const moveFwd = THREE.MathUtils.clamp(kbFwd - padMoveY, -1, 1);
+    const moveStrafe = THREE.MathUtils.clamp(kbStrafe + padMoveX, -1, 1);
 
     _forward.set(-Math.sin(this.playerYaw), 0, -Math.cos(this.playerYaw));
     _right.set(Math.cos(this.playerYaw), 0, -Math.sin(this.playerYaw));
@@ -1939,8 +2268,10 @@ export class GameEngine {
     const kbStrafe =
       (this.keys['KeyD'] || this.keys['ArrowRight'] ? 1 : 0) -
       (this.keys['KeyA'] || this.keys['KeyQ'] || this.keys['ArrowLeft'] ? 1 : 0);
-    const moveFwd = THREE.MathUtils.clamp(kbFwd - this.padState.moveY, -1, 1);
-    const moveStrafe = THREE.MathUtils.clamp(kbStrafe + this.padState.moveX, -1, 1);
+    const padMoveY = this.isGamepadActive() ? this.padState.moveY : 0;
+    const padMoveX = this.isGamepadActive() ? this.padState.moveX : 0;
+    const moveFwd = THREE.MathUtils.clamp(kbFwd - padMoveY, -1, 1);
+    const moveStrafe = THREE.MathUtils.clamp(kbStrafe + padMoveX, -1, 1);
 
     _forward.set(-Math.sin(this.playerYaw), 0, -Math.cos(this.playerYaw));
     _right.set(Math.cos(this.playerYaw), 0, -Math.sin(this.playerYaw));
@@ -1972,6 +2303,9 @@ export class GameEngine {
       this.playerStance = 'stand';
       return;
     }
+    this.dualShock.clearSprintLatch();
+    this.touchSprint = false;
+    this.kbTacSprintLatched = false;
     if (this.triggerPlayerSlide()) {
       return;
     }
@@ -1985,11 +2319,11 @@ export class GameEngine {
       this.playerDiveTimer = 0;
       return;
     }
-    if (
-      allowDive &&
-      (this.isSprinting || this.isTacSprinting || this.sprintMomentumTimer > 0) &&
-      this.triggerPlayerDive()
-    ) {
+    const wasSprinting = this.isSprinting || this.isTacSprinting || this.sprintMomentumTimer > 0;
+    this.dualShock.clearSprintLatch();
+    this.touchSprint = false;
+    this.kbTacSprintLatched = false;
+    if (allowDive && wasSprinting && this.triggerPlayerDive()) {
       return;
     }
     this.playerSlideTimer = 0;
@@ -1998,8 +2332,19 @@ export class GameEngine {
     this.dualShock.rumble(0.18, 0.3, 90);
   }
 
+  private onMobileFirstGesture = () => {
+    if (!this.isMobileDevice || this.userExitedFullscreen) return;
+    if (!document.fullscreenElement || this.isPortrait) {
+      this.requestFullscreenImmersive();
+    }
+  };
+
   private bindEvents() {
     window.addEventListener('resize', this.onResize);
+    window.addEventListener('orientationchange', this.onResize);
+    window.visualViewport?.addEventListener('resize', this.onResize);
+    window.addEventListener('pointerdown', this.onMobileFirstGesture, { capture: true, passive: true });
+    document.addEventListener('fullscreenchange', this.onFullscreenChange);
     window.addEventListener('blur', this.onWindowBlur);
     window.addEventListener('keydown', this.onKeyDown);
     window.addEventListener('keyup', this.onKeyUp);
@@ -2011,22 +2356,37 @@ export class GameEngine {
     document.addEventListener('pointerlockchange', this.onPointerLockChange);
   }
 
+  private onFullscreenChange = () => {
+    this.isFullscreen = Boolean(document.fullscreenElement);
+    if (this.isFullscreen && this.isMobileDevice) {
+      this.tryLockLandscape();
+    }
+    this.onResize();
+  };
+
   private onResize = () => {
     if (this.disposed) return;
     const w = this.container.clientWidth || window.innerWidth;
     const h = this.container.clientHeight || window.innerHeight;
-    this.camera.aspect = w / h;
+    this.isPortrait = h > w;
+    this.isMobileDevice = this.detectMobileDevice();
+    this.camera.aspect = w / Math.max(1, h);
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(w, h);
     this.renderer.setPixelRatio(
-      this.isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 2)
+      this.isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, this.isMobileDevice ? 1.25 : 1.5)
     );
+    this.syncHud();
   };
 
   private onWindowBlur = () => {
     this.keys = {};
     this.mouseDownLeft = false;
     this.mouseDownRight = false;
+    this.touchFireHeld = false;
+    this.touchMoveX = 0;
+    this.touchMoveY = 0;
+    this.touchSprint = false;
   };
 
   private onPointerLockChange = () => {
@@ -2046,6 +2406,30 @@ export class GameEngine {
   private onKeyDown = (e: KeyboardEvent) => {
     this.keys[e.code] = true;
 
+    const inSettingsOrArmory =
+      this.phase === 'paused' || this.phase === 'victory' || this.phase === 'defeat' || this.armoryOpen;
+    if (inSettingsOrArmory && this.isGamepadActive()) {
+      const blockedCodes = [
+        'Escape',
+        'Tab',
+        'Enter',
+        'Space',
+        'ArrowUp',
+        'ArrowDown',
+        'ArrowLeft',
+        'ArrowRight',
+        'Home',
+        'End',
+        'PageUp',
+        'PageDown',
+        'KeyB',
+      ];
+      if (blockedCodes.includes(e.code)) {
+        e.preventDefault();
+      }
+      return;
+    }
+
     if (e.code === 'Escape') {
       if (this.phase === 'playing') {
         this.phase = 'paused';
@@ -2059,7 +2443,17 @@ export class GameEngine {
 
     if (this.phase !== 'playing') return;
 
+    if ((e.code === 'KeyH' || e.code === 'Digit4') && !e.repeat) {
+      this.toggleReconDrone();
+      return;
+    }
+    if (this.droneActive && (e.code === 'KeyM' || e.code === 'KeyE') && !e.repeat) {
+      this.markEnemiesWithDrone();
+      return;
+    }
+
     if (e.code === 'Space' && !e.repeat) {
+      if (this.droneActive) return;
       if (this.playerHp <= 0 && this.killcam.active) {
         this.skipKillcam();
         return;
@@ -2078,6 +2472,7 @@ export class GameEngine {
       this.jumpJustPressed = true;
     }
     if ((e.code === 'ShiftLeft' || e.code === 'ShiftRight') && !e.repeat) {
+      if (this.droneActive) return;
       if (this.adsAlpha > 0.5 && isSniperWeapon(this.currentWeaponId)) {
         this.sniperZoomIdx = this.sniperZoomIdx === 0 ? 1 : 0;
         this.audio.playCommandChirp('ack');
@@ -2095,21 +2490,23 @@ export class GameEngine {
       }
       this.lastShiftTapTime = now;
     }
-    if ((e.code === 'KeyC' || e.code === 'ControlLeft') && !e.repeat) {
-      this.handleCrouchAction();
+    if (!this.droneActive) {
+      if ((e.code === 'KeyC' || e.code === 'ControlLeft') && !e.repeat) {
+        this.handleCrouchAction();
+      }
+      if ((e.code === 'KeyX' || e.code === 'AltLeft') && !e.repeat) {
+        this.handleProneAction(true);
+      }
+      if (e.code === 'KeyV') {
+        this.adsToggle = !this.adsToggle;
+      }
+      if (e.code === 'Digit1') this.switchLoadoutSlot(0);
+      if (e.code === 'Digit2') this.switchLoadoutSlot(1);
+      if (e.code === 'Digit3') this.switchLoadoutSlot(2);
+      if (e.code === 'KeyR') this.startReload();
+      if (e.code === 'KeyG' && !e.repeat) this.throwGrenade('frag');
+      if (e.code === 'KeyE' && !e.repeat) this.throwGrenade('smoke');
     }
-    if ((e.code === 'KeyX' || e.code === 'AltLeft') && !e.repeat) {
-      this.handleProneAction(true);
-    }
-    if (e.code === 'KeyV') {
-      this.adsToggle = !this.adsToggle;
-    }
-    if (e.code === 'Digit1') this.switchLoadoutSlot(0);
-    if (e.code === 'Digit2') this.switchLoadoutSlot(1);
-    if (e.code === 'Digit3') this.switchLoadoutSlot(2);
-    if (e.code === 'KeyR') this.startReload();
-    if (e.code === 'KeyG' && !e.repeat) this.throwGrenade('frag');
-    if (e.code === 'KeyE' && !e.repeat) this.throwGrenade('smoke');
     if (e.code === 'KeyI' && !e.repeat) this.toggleStatusPanel();
     if (e.code === 'Tab' && !e.repeat) {
       e.preventDefault();
@@ -2123,15 +2520,15 @@ export class GameEngine {
     }
     if (e.code === 'F2') {
       e.preventDefault();
-      this.issueTacticalOrder('follow');
+      this.issueTacticalOrder('eliminate');
     }
     if (e.code === 'F3') {
       e.preventDefault();
-      this.issueTacticalOrder('hold');
+      this.issueTacticalOrder('cover');
     }
     if (e.code === 'F4') {
       e.preventDefault();
-      this.issueTacticalOrder('suppress');
+      this.issueTacticalOrder('move');
     }
   };
 
@@ -2141,6 +2538,13 @@ export class GameEngine {
 
   private onMouseMove = (e: MouseEvent) => {
     if (this.phase !== 'playing' || !this.pointerLocked || this.playerHp <= 0) return;
+    if (this.droneActive) {
+      const droneSens = this.mouseSensitivity * 0.85;
+      this.droneYaw -= e.movementX * droneSens;
+      this.dronePitch -= e.movementY * droneSens;
+      this.dronePitch = THREE.MathUtils.clamp(this.dronePitch, -1.28, 0.28);
+      return;
+    }
     const spec = WEAPON_SPECS[this.currentWeaponId];
     let adsZoomScale = 1.0;
     if (this.adsAlpha > 0.5) {
@@ -2161,6 +2565,14 @@ export class GameEngine {
     this.audio.unlock();
     if (!this.pointerLocked) {
       this.requestPointerLock();
+      return;
+    }
+    if (this.droneActive) {
+      if (e.button === 0) {
+        this.markEnemiesWithDrone();
+      } else if (e.button === 2) {
+        this.recallReconDrone(false);
+      }
       return;
     }
     if (e.button === 0) {
@@ -2649,6 +3061,9 @@ export class GameEngine {
     this.recentCombatIntensity = Math.min(1, this.recentCombatIntensity + 0.4);
     this.audio.playWoundGrunt();
     this.dualShock.rumble(0.45, 0.65, 140);
+    if (this.droneActive) {
+      this.recallReconDrone(false);
+    }
 
     if (this.playerHp <= 0) {
       this.playerDeaths++;
@@ -2741,19 +3156,21 @@ export class GameEngine {
       vm.warheadMesh.visible = false;
     }
 
-    // Zero-parallax camera convergence aiming & stance-stabilized ballistic spread
+    // Zero-parallax camera convergence aiming & stance-stabilized ballistic precision
     const isMoving = Math.hypot(this.playerVel.x, this.playerVel.z) > 0.6;
     const stanceSpreadMult =
-      this.playerStance === 'prone' ? 0.52 : this.playerStance === 'crouch' ? 0.72 : 1.0;
+      this.playerStance === 'prone' ? 0.44 : this.playerStance === 'crouch' ? 0.68 : 1.0;
     const adsPrecisionMode = this.adsAlpha > 0.65;
+    const movePenaltyScale = 1 - this.adsAlpha * (isSniper ? 0.96 : 0.92);
+    const bloomMult = adsPrecisionMode ? (isSniper ? 0.14 : 0.35) : 1.0;
     const spread =
       (THREE.MathUtils.lerp(spec.baseSpread, spec.adsSpread, this.adsAlpha) +
-        (isMoving ? spec.moveSpreadPenalty * (1 - this.adsAlpha * 0.88) : 0) +
-        this.spreadBloom * (adsPrecisionMode ? 0.55 : 1.0)) *
+        (isMoving ? spec.moveSpreadPenalty * movePenaltyScale : 0) +
+        this.spreadBloom * bloomMult) *
       stanceSpreadMult;
 
     _fireDir.set(0, 0, -1).applyQuaternion(this.camera.quaternion).normalize();
-    let convergeDist = isFlame ? 18 : 160;
+    let convergeDist = isFlame ? 18 : 240;
     const camRayEnd = _tmpVec.copy(this.camera.position).addScaledVector(_fireDir, convergeDist);
     const camEnvHit = intersectSegmentEnvironment(
       this.camera.position,
@@ -2770,7 +3187,7 @@ export class GameEngine {
       const aimOffset = s.stance === 'prone' ? 0.34 : s.stance === 'crouch' ? 0.85 : 1.28;
       _tmpVec2.set(s.position.x, s.position.y + aimOffset, s.position.z);
       const d = _tmpVec2.distanceTo(this.camera.position);
-      if (d < convergeDist && this.pointToSegmentDist(_tmpVec2, this.camera.position, camRayEnd) < 0.52) {
+      if (d < convergeDist && this.pointToSegmentDist(_tmpVec2, this.camera.position, camRayEnd) < 0.56) {
         convergeDist = Math.max(1.5, d);
       }
     }
@@ -2785,9 +3202,10 @@ export class GameEngine {
       _fireDir.subVectors(_aimTarget, _muzzleWorld).normalize();
     }
 
-    _fireDir.x += (Math.random() - 0.5) * spread;
-    _fireDir.y += (Math.random() - 0.5) * spread;
-    _fireDir.z += (Math.random() - 0.5) * spread;
+    const horizSpread = adsPrecisionMode && isSniper ? spread * 0.2 : spread;
+    _fireDir.x += (Math.random() - 0.5) * horizSpread;
+    _fireDir.y += (Math.random() - 0.5) * spread * (adsPrecisionMode && isSniper ? 0.45 : 1.0);
+    _fireDir.z += (Math.random() - 0.5) * horizSpread;
     _fireDir.normalize();
 
     if (this.aimingAtAlly) {
@@ -3141,10 +3559,11 @@ export class GameEngine {
 
       b.prevPos.copy(b.pos);
 
-      // Realistic gravity drop + crosswind drift + aerodynamic drag
+      // Realistic gravity drop + crosswind drift (stabilized on heavy/precision rounds) + aerodynamic drag
+      const windDriftFactor = isSniperWeapon(b.weaponId) ? 0.1 : 0.42;
       b.vel.y -= 9.81 * dt;
-      b.vel.x += wind.x * 0.55 * dt;
-      b.vel.z += wind.z * 0.55 * dt;
+      b.vel.x += wind.x * windDriftFactor * dt;
+      b.vel.z += wind.z * windDriftFactor * dt;
       const spd = b.vel.length();
       b.vel.multiplyScalar(Math.exp(-b.airDrag * spd * dt));
       b.pos.addScaledVector(b.vel, dt);
@@ -3775,7 +4194,12 @@ export class GameEngine {
     if (this.playerHp <= 0) {
       this.isRegenerating = false;
       this.aimingAtAlly = null;
-      if (this.padState.connected && this.padState.confirmJustPressed) {
+      this.aimingAtEnemy = false;
+      this.aimingEnemyDist = null;
+      this.aimedEnemyRef = null;
+      this.scopeRangeMeters = null;
+      this.scopeDropSvgUnits = 0;
+      if (this.isGamepadActive() && this.padState.confirmJustPressed) {
         this.skipKillcam();
         return;
       }
@@ -3852,8 +4276,25 @@ export class GameEngine {
     if (this.playerDiveTimer > 0) this.playerDiveTimer = Math.max(0, this.playerDiveTimer - dt);
     if (this.playerDiveCooldown > 0) this.playerDiveCooldown = Math.max(0, this.playerDiveCooldown - dt);
 
+    if (this.droneClimbBurstTimer > 0) this.droneClimbBurstTimer = Math.max(0, this.droneClimbBurstTimer - dt);
+    if (this.droneDescendBurstTimer > 0) this.droneDescendBurstTimer = Math.max(0, this.droneDescendBurstTimer - dt);
+    if (this.droneScanAudioCooldown > 0) this.droneScanAudioCooldown = Math.max(0, this.droneScanAudioCooldown - dt);
+
+    const padActive = this.isGamepadActive();
+
+    if (padActive && this.padState.droneToggleJustPressed) {
+      this.toggleReconDrone();
+    }
+
+    if (this.droneActive) {
+      this.updateReconDrone(dt, padActive);
+      return;
+    } else {
+      this.droneBattery = Math.min(100, this.droneBattery + dt * 9.5);
+    }
+
     // DualShock full all-button actions
-    if (this.padState.connected) {
+    if (padActive) {
       if (
         this.padState.l3JustPressed &&
         this.padState.adsHeld &&
@@ -3943,17 +4384,18 @@ export class GameEngine {
       }
     }
 
-    // Firing check (Mouse OR DualShock R2!)
+    // Firing check (Mouse OR DualShock R2 OR Mobile Touch Fire!)
     const spec = WEAPON_SPECS[this.currentWeaponId];
     const mouseWantsFire = this.mouseDownLeft && this.pointerLocked;
-    const padWantsFire = this.padState.connected && this.padState.fireHeld;
-    if (mouseWantsFire || padWantsFire) {
-      if (spec.fireMode === 'AUTO' || !this.semiShotLocked || this.padState.fireJustPressed) {
+    const padWantsFire = padActive && this.padState.fireHeld;
+    const touchWantsFire = this.isMobileDevice && !padActive && this.touchFireHeld;
+    if (mouseWantsFire || padWantsFire || touchWantsFire) {
+      if (spec.fireMode === 'AUTO' || !this.semiShotLocked || (padActive && this.padState.fireJustPressed)) {
         this.firePlayerWeapon();
       }
     }
 
-    // Movement input (supports WASD, AZERTY ZQSD, AND DualShock Left Stick!)
+    // Movement input (supports WASD, AZERTY ZQSD, DualShock Left Stick, AND Mobile Virtual Stick!)
     const kbFwd =
       (this.keys['KeyW'] || this.keys['KeyZ'] || this.keys['ArrowUp'] ? 1 : 0) -
       (this.keys['KeyS'] || this.keys['ArrowDown'] ? 1 : 0);
@@ -3961,35 +4403,50 @@ export class GameEngine {
       (this.keys['KeyD'] || this.keys['ArrowRight'] ? 1 : 0) -
       (this.keys['KeyA'] || this.keys['KeyQ'] || this.keys['ArrowLeft'] ? 1 : 0);
 
-    const moveFwd = THREE.MathUtils.clamp(kbFwd - this.padState.moveY, -1, 1);
-    const moveStrafe = THREE.MathUtils.clamp(kbStrafe + this.padState.moveX, -1, 1);
+    const tMoveFwd = this.isMobileDevice && !padActive ? -this.touchMoveY : 0;
+    const tMoveStrafe = this.isMobileDevice && !padActive ? this.touchMoveX : 0;
+    const moveFwd = THREE.MathUtils.clamp(kbFwd - (padActive ? this.padState.moveY : 0) + tMoveFwd, -1, 1);
+    const moveStrafe = THREE.MathUtils.clamp(kbStrafe + (padActive ? this.padState.moveX : 0) + tMoveStrafe, -1, 1);
 
     _forward.set(-Math.sin(this.playerYaw), 0, -Math.cos(this.playerYaw));
     _right.set(Math.cos(this.playerYaw), 0, -Math.sin(this.playerYaw));
     _wishDir.set(0, 0, 0).addScaledVector(_forward, moveFwd).addScaledVector(_right, moveStrafe);
     if (_wishDir.lengthSq() > 1) _wishDir.normalize();
 
-    const isCrouched = this.playerStance === 'crouch';
-    const isProne = this.playerStance === 'prone';
-    const wantsAdsInput = this.mouseDownRight || this.adsToggle || this.padState.adsHeld;
+    const wantsAdsInput =
+      this.mouseDownRight ||
+      this.adsToggle ||
+      (padActive && this.padState.adsHeld) ||
+      (this.isMobileDevice && !padActive && this.touchAdsHeld);
     const isSliding = this.playerSlideTimer > 0;
     const shiftHeld = Boolean(this.keys['ShiftLeft'] || this.keys['ShiftRight']);
-    const wantsSprint =
-      (shiftHeld || this.padState.sprintHeld) &&
+    const padSprint = padActive && this.padState.sprintHeld;
+    const mobileSprint = this.isMobileDevice && !padActive && this.touchSprint;
+    const padTacSprint = padActive && this.padState.tacSprintHeld;
+    const canEngageSprint =
+      (shiftHeld || padSprint || mobileSprint) &&
       moveFwd > 0.22 &&
-      this.playerStance === 'stand' &&
       !wantsAdsInput &&
       !isSliding &&
       this.playerDiveTimer <= 0 &&
       this.playerStamina > 5;
 
-    if (!shiftHeld && !this.padState.sprintHeld) {
+    // Directly stand up from crouch or prone whenever the player engages sprint
+    if (canEngageSprint && this.playerStance !== 'stand') {
+      this.playerStance = 'stand';
+    }
+
+    const isCrouched = this.playerStance === 'crouch';
+    const isProne = this.playerStance === 'prone';
+    const wantsSprint = canEngageSprint && this.playerStance === 'stand';
+
+    if (!shiftHeld && !padSprint) {
       this.kbTacSprintLatched = false;
     }
 
     const wantsTacSprint =
       wantsSprint &&
-      (this.kbTacSprintLatched || this.padState.tacSprintHeld) &&
+      (this.kbTacSprintLatched || padTacSprint) &&
       this.playerStamina > 16;
 
     this.isSprinting = wantsSprint && _wishDir.lengthSq() > 0.1;
@@ -4156,11 +4613,15 @@ export class GameEngine {
     );
 
     const slideFovBoost = isSliding ? (this.playerSlideTimer / 0.66) * 7.5 : 0;
-    const baseMoveFov = 72 + this.sprintBlend * 4.5 + this.tacSprintBlend * 8.5 + slideFovBoost;
+    const portraitFovBoost =
+      this.camera.aspect < 0.95
+        ? THREE.MathUtils.clamp(1.0 + (0.95 - this.camera.aspect) * 0.44, 1.0, 1.24)
+        : 1.0;
+    const baseMoveFov = (72 + this.sprintBlend * 4.5 + this.tacSprintBlend * 8.5 + slideFovBoost) * portraitFovBoost;
     const targetAdsFov =
       isSniperWeapon(this.currentWeaponId) && spec.zoomFovs
         ? spec.zoomFovs[this.sniperZoomIdx]
-        : spec.adsFov;
+        : spec.adsFov * (this.camera.aspect < 0.95 ? 1.12 : 1.0);
     const targetFov = THREE.MathUtils.lerp(baseMoveFov, targetAdsFov, this.adsAlpha);
     if (Math.abs(this.camera.fov - targetFov) > 0.05) {
       this.camera.fov = targetFov;
@@ -4258,6 +4719,13 @@ export class GameEngine {
     const swayY = Math.abs(Math.sin(this.weaponBobPhase)) * -0.014 * swayMult;
 
     this.weaponAnchor.position.lerpVectors(spec.hipOffset, spec.adsOffset, this.adsAlpha);
+    if (this.camera.aspect < 0.85) {
+      // Pull hipfire viewmodel cleanly inward and slightly compact on vertical Android screens
+      this.weaponAnchor.position.x *= THREE.MathUtils.lerp(0.68, 1.0, this.adsAlpha);
+      this.weaponAnchor.scale.setScalar(THREE.MathUtils.lerp(0.84, 1.0, this.adsAlpha));
+    } else {
+      this.weaponAnchor.scale.setScalar(1);
+    }
     this.weaponAnchor.position.x +=
       swayX -
       this.sprintBlend * 0.032 -
@@ -4341,9 +4809,376 @@ export class GameEngine {
     this.updateFriendlyIff();
   }
 
+  private initReconDrone() {
+    this.droneGroup = new THREE.Group();
+    this.droneRotors = [];
+
+    const frameMat = new THREE.MeshStandardMaterial({
+      color: '#1b2420',
+      roughness: 0.45,
+      metalness: 0.65,
+    });
+    const accentMat = new THREE.MeshStandardMaterial({
+      color: '#38bdf8',
+      emissive: '#0284c7',
+      emissiveIntensity: 0.75,
+      roughness: 0.3,
+    });
+    const rotorMat = new THREE.MeshBasicMaterial({
+      color: '#cbd5e1',
+      transparent: true,
+      opacity: 0.55,
+      side: THREE.DoubleSide,
+    });
+
+    const core = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.08, 0.38), frameMat);
+    this.droneGroup.add(core);
+
+    const gimbal = new THREE.Mesh(new THREE.SphereGeometry(0.06, 10, 8), accentMat);
+    gimbal.position.set(0, -0.06, -0.11);
+    this.droneGroup.add(gimbal);
+
+    const armCoords: Array<[number, number]> = [
+      [-0.22, -0.22],
+      [0.22, -0.22],
+      [-0.22, 0.22],
+      [0.22, 0.22],
+    ];
+    for (const [ax, az] of armCoords) {
+      const arm = new THREE.Mesh(new THREE.BoxGeometry(0.035, 0.025, 0.32), frameMat);
+      arm.position.set(ax * 0.52, 0.01, az * 0.52);
+      arm.rotation.y = Math.atan2(ax, az);
+      this.droneGroup.add(arm);
+
+      const pod = new THREE.Mesh(new THREE.CylinderGeometry(0.032, 0.032, 0.05, 8), frameMat);
+      pod.position.set(ax, 0.03, az);
+      this.droneGroup.add(pod);
+
+      const rotor = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.006, 0.024), rotorMat);
+      rotor.position.set(ax, 0.062, az);
+      this.droneGroup.add(rotor);
+      this.droneRotors.push(rotor);
+    }
+
+    this.droneGroup.visible = false;
+    this.scene.add(this.droneGroup);
+  }
+
+  private toggleReconDrone() {
+    if (this.phase !== 'playing' || this.playerHp <= 0 || this.killcam.active) return;
+    if (this.droneActive) {
+      this.recallReconDrone(false);
+      return;
+    }
+    if (this.droneBattery < 18) {
+      this.pushRadioBanner(`BATTERIE DRONE FAIBLE (${Math.round(this.droneBattery)}%)`);
+      this.audio.playCommandChirp('ack');
+      return;
+    }
+    this.droneActive = true;
+    this.adsToggle = false;
+    this.mouseDownRight = false;
+    this.touchAdsHeld = false;
+    this.touchFireHeld = false;
+    this.isReloading = false;
+    if (this.playerStance === 'stand') {
+      this.playerStance = 'crouch';
+    }
+    this.droneYaw = this.playerYaw;
+    this.dronePitch = -0.34;
+    const fx = -Math.sin(this.playerYaw);
+    const fz = -Math.cos(this.playerYaw);
+    const sx = THREE.MathUtils.clamp(this.playerPos.x + fx * 1.8, -PLAYABLE_HALF_EXTENT + 4, PLAYABLE_HALF_EXTENT - 4);
+    const sz = THREE.MathUtils.clamp(this.playerPos.z + fz * 1.8, -PLAYABLE_HALF_EXTENT + 4, PLAYABLE_HALF_EXTENT - 4);
+    const sy = groundHeightAt(sx, sz) + 4.4;
+    this.dronePos.set(sx, sy, sz);
+    this.droneVel.set(0, 0, 0);
+    this.droneGroup.position.copy(this.dronePos);
+    this.droneGroup.visible = true;
+    this.weaponAnchor.visible = false;
+    this.audio.playDroneEvent('deploy');
+    this.pushRadioBanner('DRONE RECON DÉPLOYÉ · VISEZ UN FOURRÉ & MARQUEZ [CLIC / M / R2]');
+    this.syncHud();
+  }
+
+  private recallReconDrone(lowBattery = false) {
+    if (!this.droneActive) return;
+    this.droneActive = false;
+    this.droneAimingEnemy = false;
+    this.droneAimingEnemyName = null;
+    this.droneAimingEnemyDist = null;
+    this.droneClimbBurstTimer = 0;
+    this.droneDescendBurstTimer = 0;
+    if (this.droneGroup) this.droneGroup.visible = false;
+    this.weaponAnchor.visible = this.phase === 'playing';
+    this.audio.playDroneEvent('recall');
+    if (lowBattery) {
+      this.pushRadioBanner('DRONE RECON RAPPELÉ — BATTERIE ÉPUISÉE');
+    } else {
+      this.pushRadioBanner('DRONE RECON RAPPELÉ');
+    }
+    this.syncHud();
+  }
+
+  private markEnemiesWithDrone() {
+    if (!this.droneActive || this.phase !== 'playing' || this.playerHp <= 0) return;
+
+    _forward.set(0, 0, -1).applyQuaternion(this.camera.quaternion).normalize();
+    let newlyMarked = 0;
+    let firstMarkedName: string | null = null;
+
+    for (let i = 0; i < this.soldiers.length; i++) {
+      const s = this.soldiers[i];
+      if (!s.alive || s.faction === this.playerFaction) continue;
+      const aimY = s.stance === 'prone' ? 0.35 : s.isCrouching ? 0.85 : 1.25;
+      _tmpVec.set(s.position.x, s.position.y + aimY, s.position.z);
+      _tmpVec2.subVectors(_tmpVec, this.dronePos);
+      const dist = _tmpVec2.length();
+      if (dist > 105 || dist < 1.0) continue;
+      _tmpVec2.divideScalar(dist);
+      if (_tmpVec2.dot(_forward) < 0.962) continue; // ~15.8° optic cone
+
+      if (!hasDroneOpticLos(this.dronePos, _tmpVec, this.world.boxColliders)) continue;
+
+      const wasMarked = s.droneMarkedTimer > 1.5;
+      s.droneMarkedTimer = 18.0;
+      if (!wasMarked) {
+        newlyMarked++;
+        if (!firstMarkedName) firstMarkedName = `${s.rankTitle} ${s.name}`;
+      }
+    }
+
+    if (newlyMarked > 0) {
+      this.audio.playDroneEvent('mark');
+      this.dualShock.rumble(0.18, 0.25, 95);
+      this.awardRankXp(newlyMarked * 8);
+      this.pushRadioBanner(
+        newlyMarked === 1 && firstMarkedName
+          ? `ENNEMI MARQUÉ DANS LES FOURRÉS : ${firstMarkedName} (18s)`
+          : `${newlyMarked} ENNEMIS MARQUÉS POUR VOS SUBORDONNÉS (18s)`
+      );
+      this.syncHud();
+    } else if (this.droneScanAudioCooldown <= 0) {
+      this.droneScanAudioCooldown = 0.55;
+      this.audio.playDroneEvent('scan');
+    }
+  }
+
+  private updateReconDrone(dt: number, padActive: boolean) {
+    this.droneBattery = Math.max(0, this.droneBattery - dt * 3.4);
+    if (this.droneBattery <= 0) {
+      this.recallReconDrone(true);
+      return;
+    }
+
+    if (padActive) {
+      if (this.padState.nextWeaponJustPressed) {
+        this.recallReconDrone(false);
+        return;
+      }
+      if (this.padState.fireJustPressed || this.padState.reloadJustPressed) {
+        this.markEnemiesWithDrone();
+      }
+      if (this.padState.quickOrderJustPressed) this.issueTacticalOrder('follow');
+      if (this.padState.cycleOrderJustPressed) this.cycleTacticalOrder();
+      if (this.padState.issueOrderJustPressed) this.issueTacticalOrder(this.selectedOrder);
+
+      if (Math.abs(this.padState.lookX) > 0.001 || Math.abs(this.padState.lookY) > 0.001) {
+        const padSens = this.gamepadSettings.lookSensitivity * 0.85;
+        this.droneYaw -= this.padState.lookX * padSens * dt;
+        this.dronePitch = THREE.MathUtils.clamp(
+          this.dronePitch - this.padState.lookY * padSens * 0.78 * dt,
+          -1.28,
+          0.28
+        );
+      }
+    }
+
+    const kbFwd =
+      (this.keys['KeyW'] || this.keys['KeyZ'] || this.keys['ArrowUp'] ? 1 : 0) -
+      (this.keys['KeyS'] || this.keys['ArrowDown'] ? 1 : 0);
+    const kbStrafe =
+      (this.keys['KeyD'] || this.keys['ArrowRight'] ? 1 : 0) -
+      (this.keys['KeyA'] || this.keys['KeyQ'] || this.keys['ArrowLeft'] ? 1 : 0);
+    const kbUp =
+      (this.keys['Space'] || this.droneClimbBurstTimer > 0 ? 1 : 0) -
+      (this.keys['KeyC'] || this.keys['ControlLeft'] || this.droneDescendBurstTimer > 0 ? 1 : 0);
+
+    const tMoveFwd = this.isMobileDevice && !padActive ? -this.touchMoveY : 0;
+    const tMoveStrafe = this.isMobileDevice && !padActive ? this.touchMoveX : 0;
+    const moveFwd = THREE.MathUtils.clamp(kbFwd - (padActive ? this.padState.moveY : 0) + tMoveFwd, -1, 1);
+    const moveStrafe = THREE.MathUtils.clamp(kbStrafe + (padActive ? this.padState.moveX : 0) + tMoveStrafe, -1, 1);
+    const padVert = padActive
+      ? (this.padState.jumpHeld ? 1 : 0) - (this.padState.crouchHeld ? 1 : 0)
+      : 0;
+    const moveVert = THREE.MathUtils.clamp(kbUp + padVert, -1, 1);
+
+    const boost =
+      this.keys['ShiftLeft'] ||
+      this.keys['ShiftRight'] ||
+      (padActive && this.padState.sprintHeld) ||
+      (this.isMobileDevice && !padActive && this.touchSprint);
+    const horizSpeed = boost ? 16.0 : 11.5;
+
+    _forward.set(-Math.sin(this.droneYaw), 0, -Math.cos(this.droneYaw));
+    _right.set(Math.cos(this.droneYaw), 0, -Math.sin(this.droneYaw));
+    _wishDir
+      .set(0, 0, 0)
+      .addScaledVector(_forward, moveFwd)
+      .addScaledVector(_right, moveStrafe);
+    if (_wishDir.lengthSq() > 1) _wishDir.normalize();
+
+    const targetVx = _wishDir.x * horizSpeed;
+    const targetVz = _wishDir.z * horizSpeed;
+    const targetVy = moveVert * 7.8;
+
+    const damp = 1 - Math.exp(-8.5 * dt);
+    this.droneVel.x = THREE.MathUtils.lerp(this.droneVel.x, targetVx, damp);
+    this.droneVel.y = THREE.MathUtils.lerp(this.droneVel.y, targetVy, damp);
+    this.droneVel.z = THREE.MathUtils.lerp(this.droneVel.z, targetVz, damp);
+
+    this.dronePos.addScaledVector(this.droneVel, dt);
+    this.dronePos.x = THREE.MathUtils.clamp(this.dronePos.x, -PLAYABLE_HALF_EXTENT + 2, PLAYABLE_HALF_EXTENT - 2);
+    this.dronePos.z = THREE.MathUtils.clamp(this.dronePos.z, -PLAYABLE_HALF_EXTENT + 2, PLAYABLE_HALF_EXTENT - 2);
+
+    // Enforce short-range horizontal radio tether around operator
+    const dx = this.dronePos.x - this.playerPos.x;
+    const dz = this.dronePos.z - this.playerPos.z;
+    const hDist = Math.hypot(dx, dz);
+    if (hDist > this.droneMaxRange) {
+      const k = this.droneMaxRange / hDist;
+      this.dronePos.x = this.playerPos.x + dx * k;
+      this.dronePos.z = this.playerPos.z + dz * k;
+    }
+
+    const groundFloor = groundHeightAt(this.dronePos.x, this.dronePos.z);
+    const minAlt = groundFloor + 1.45;
+    const maxAlt = groundFloor + 42.0;
+    this.dronePos.y = THREE.MathUtils.clamp(this.dronePos.y, minAlt, maxAlt);
+
+    const hoverY = Math.sin(this.elapsed * 4.5) * 0.04;
+    this.droneGroup.position.set(this.dronePos.x, this.dronePos.y + hoverY, this.dronePos.z);
+    this.droneGroup.rotation.y = this.droneYaw;
+    this.droneGroup.rotation.x = THREE.MathUtils.clamp(-moveFwd * 0.14, -0.2, 0.2);
+    this.droneGroup.rotation.z = THREE.MathUtils.clamp(-moveStrafe * 0.14, -0.2, 0.2);
+    for (let r = 0; r < this.droneRotors.length; r++) {
+      this.droneRotors[r].rotation.y += dt * (r % 2 === 0 ? 44 : -44);
+    }
+
+    // Attach camera to stabilized gimbal underneath drone
+    this.camera.position.set(this.dronePos.x, this.dronePos.y + hoverY - 0.12, this.dronePos.z);
+    _euler.set(this.dronePitch, this.droneYaw, 0, 'YXZ');
+    this.camera.quaternion.setFromEuler(_euler);
+    if (Math.abs(this.camera.fov - 66) > 0.1) {
+      this.camera.fov = 66;
+      this.camera.updateProjectionMatrix();
+    }
+
+    this.weaponAnchor.visible = false;
+    this.sunLight.position.set(this.dronePos.x + 42, 62, this.dronePos.z + 34);
+    this.sunLight.target.position.set(this.dronePos.x, 0, this.dronePos.z);
+
+    const distRiver = Math.abs(this.dronePos.z - riverCenterZ(this.dronePos.x));
+    this.audio.updateAmbience(
+      distRiver,
+      this.weather.currentRainIntensity,
+      this.weather.windVector.length()
+    );
+
+    // Optical target acquisition through bushes/thickets + refresh IFF/recon sprites
+    _forward.set(0, 0, -1).applyQuaternion(this.camera.quaternion).normalize();
+    let bestEnemyDist = 115;
+    let bestEnemyRef: { key: string; pos: THREE.Vector3; name: string } | null = null;
+    for (let i = 0; i < this.soldiers.length; i++) {
+      const s = this.soldiers[i];
+      if (!s.alive) {
+        s.iffSprite.visible = false;
+        s.reconMarkSprite.visible = false;
+        continue;
+      }
+      if (s.faction === this.playerFaction) {
+        const d = s.position.distanceTo(this.camera.position);
+        s.iffSprite.visible = d > 1.2 && d < 120;
+        const sc = THREE.MathUtils.clamp(0.32 + d * 0.0085, 0.32, 0.85);
+        s.iffSprite.scale.set(sc, sc, 1);
+        s.reconMarkSprite.visible = false;
+      } else {
+        s.iffSprite.visible = false;
+        this.updateSoldierReconSprite(s);
+        const aimY = s.stance === 'prone' ? 0.34 : s.isCrouching ? 0.84 : 1.18;
+        _tmpVec.set(s.position.x, s.position.y + aimY, s.position.z);
+        _tmpVec2.subVectors(_tmpVec, this.camera.position);
+        const distChest = _tmpVec2.length();
+        if (distChest > 0.8 && distChest < bestEnemyDist) {
+          const proj = _tmpVec2.dot(_forward);
+          if (proj > 0) {
+            const perpSq = Math.max(0, distChest * distChest - proj * proj);
+            if (perpSq < 1.15 * 1.15 && hasDroneOpticLos(this.camera.position, _tmpVec, this.world.boxColliders)) {
+              bestEnemyDist = distChest;
+              bestEnemyRef = {
+                key: `ai:${s.id}`,
+                pos: s.position.clone(),
+                name: `${s.rankTitle} ${s.name}`,
+              };
+            }
+          }
+        }
+      }
+    }
+
+    this.aimingAtAlly = null;
+    this.aimingAtEnemy = bestEnemyRef !== null;
+    this.aimingEnemyDist = bestEnemyRef ? Math.round(bestEnemyDist) : null;
+    this.aimedEnemyRef = bestEnemyRef;
+    this.droneAimingEnemy = bestEnemyRef !== null;
+    this.droneAimingEnemyName = bestEnemyRef?.name ?? null;
+    this.droneAimingEnemyDist = this.aimingEnemyDist;
+  }
+
+  private updateSoldierReconSprite(s: SoldierEntity) {
+    if (!s.alive || s.droneMarkedTimer <= 0 || this.killcam.active) {
+      s.reconMarkSprite.visible = false;
+      return;
+    }
+    const d = s.position.distanceTo(this.camera.position);
+    if (d > 145) {
+      s.reconMarkSprite.visible = false;
+      return;
+    }
+    s.reconMarkSprite.visible = true;
+    const isProne = s.stance === 'prone' || s.diveTimer > 0 || s.proneTimer > 0;
+    s.reconMarkSprite.position.y = isProne ? 1.18 : s.isCrouching ? 1.72 : 2.18;
+    const pulse = 1.0 + Math.sin(this.elapsed * 7.5 + s.id) * 0.1;
+    const sc = THREE.MathUtils.clamp(0.42 + d * 0.011, 0.42, 1.35) * pulse;
+    s.reconMarkSprite.scale.set(sc, sc, 1);
+  }
+
+  private computeBulletDropSvgUnits(distMeters: number, muzzleVel: number, airDrag: number): number {
+    if (distMeters <= 2 || muzzleVel <= 1) return 0;
+    const tFlight =
+      airDrag > 0.00005
+        ? (Math.exp(airDrag * distMeters) - 1) / (airDrag * muzzleVel)
+        : distMeters / muzzleVel;
+    const dropMeters = 0.5 * 9.81 * tFlight * tFlight;
+    const dropRatio = dropMeters / distMeters;
+    const halfFovRad = THREE.MathUtils.degToRad(Math.max(4, this.camera.fov) * 0.5);
+    const normScreenY = dropRatio / Math.tan(halfFovRad);
+    const vw = Math.max(1, this.container.clientWidth || window.innerWidth);
+    const vh = Math.max(1, this.container.clientHeight || window.innerHeight);
+    const scopeHalfRatio = (0.57 * Math.min(vw, vh)) / vh;
+    const svgUnits = (normScreenY / Math.max(0.15, scopeHalfRatio)) * 100;
+    return THREE.MathUtils.clamp(Number(svgUnits.toFixed(2)), 0, 86);
+  }
+
   private updateFriendlyIff() {
     if (this.phase !== 'playing' || this.playerHp <= 0 || this.killcam.active) {
       this.aimingAtAlly = null;
+      this.aimingAtEnemy = false;
+      this.aimingEnemyDist = null;
+      this.aimedEnemyRef = null;
+      this.scopeRangeMeters = null;
+      this.scopeDropSvgUnits = 0;
+      this.scopeDropTicks = [];
       for (let i = 0; i < this.soldiers.length; i++) {
         this.soldiers[i].iffSprite.visible = false;
       }
@@ -4358,45 +5193,88 @@ export class GameEngine {
     let bestKey: string | null = null;
     let bestDist = 78;
 
+    const isSniper = isSniperWeapon(this.currentWeaponId);
+    const enemyDetectMax = isSniper && this.adsAlpha > 0.4 ? 235 : 165;
+    let bestEnemyDist = enemyDetectMax;
+    let enemySpotted = false;
+    let bestEnemyRef: { key: string; pos: THREE.Vector3; name: string } | null = null;
+
     for (let i = 0; i < this.soldiers.length; i++) {
       const s = this.soldiers[i];
-      if (!s.alive || s.faction !== this.playerFaction) {
+      if (!s.alive) {
         s.iffSprite.visible = false;
+        s.reconMarkSprite.visible = false;
         continue;
       }
 
-      const d = s.position.distanceTo(this.camera.position);
-      const showMarker = d > 1.2 && d < 92;
-      s.iffSprite.visible = showMarker;
-      if (!showMarker) continue;
-
-      const baseScale = THREE.MathUtils.clamp(0.28 + d * 0.0082, 0.28, 0.72);
-      s.iffSprite.scale.set(baseScale, baseScale, 1);
-
+      const isAlly = s.faction === this.playerFaction;
       const isProne = s.stance === 'prone' || s.diveTimer > 0 || s.proneTimer > 0;
-      _tmpVec.set(s.position.x, s.position.y + (isProne ? 0.36 : s.isCrouching ? 0.86 : 1.22), s.position.z);
-      _tmpVec2.subVectors(_tmpVec, this.camera.position);
-      const distChest = _tmpVec2.length();
-      if (distChest > 0.5 && distChest < bestDist) {
-        const proj = _tmpVec2.dot(_forward);
-        if (proj > 0) {
-          const perpSq = Math.max(0, distChest * distChest - proj * proj);
-          const hitRadius = isProne ? 0.42 : 0.54;
-          if (perpSq < hitRadius * hitRadius) {
-            const wallHit = intersectSegmentEnvironment(
-              this.camera.position,
-              _tmpVec,
-              this.world.boxColliders,
-              this.world.cylinderColliders
-            );
-            if (!wallHit) {
-              bestDist = distChest;
-              bestKey = `ai:${s.id}`;
-              bestTarget = {
-                name: `${s.rankTitle} ${s.name}`,
-                distance: Math.round(distChest),
-                isHuman: false,
-              };
+
+      if (isAlly) {
+        s.reconMarkSprite.visible = false;
+        const d = s.position.distanceTo(this.camera.position);
+        const showMarker = d > 1.2 && d < 92;
+        s.iffSprite.visible = showMarker;
+        if (!showMarker) continue;
+
+        const baseScale = THREE.MathUtils.clamp(0.28 + d * 0.0082, 0.28, 0.72);
+        s.iffSprite.scale.set(baseScale, baseScale, 1);
+
+        _tmpVec.set(s.position.x, s.position.y + (isProne ? 0.36 : s.isCrouching ? 0.86 : 1.22), s.position.z);
+        _tmpVec2.subVectors(_tmpVec, this.camera.position);
+        const distChest = _tmpVec2.length();
+        if (distChest > 0.5 && distChest < bestDist) {
+          const proj = _tmpVec2.dot(_forward);
+          if (proj > 0) {
+            const perpSq = Math.max(0, distChest * distChest - proj * proj);
+            const hitRadius = isProne ? 0.42 : 0.54;
+            if (perpSq < hitRadius * hitRadius) {
+              const wallHit = intersectSegmentEnvironment(
+                this.camera.position,
+                _tmpVec,
+                this.world.boxColliders,
+                this.world.cylinderColliders
+              );
+              if (!wallHit) {
+                bestDist = distChest;
+                bestKey = `ai:${s.id}`;
+                bestTarget = {
+                  name: `${s.rankTitle} ${s.name}`,
+                  distance: Math.round(distChest),
+                  isHuman: false,
+                };
+              }
+            }
+          }
+        }
+      } else {
+        s.iffSprite.visible = false;
+        this.updateSoldierReconSprite(s);
+        // Enemy reticle hover detection (ignores fog, smoke & grass; blocked only by solid walls/rock)
+        _tmpVec.set(s.position.x, s.position.y + (isProne ? 0.34 : s.isCrouching ? 0.84 : 1.18), s.position.z);
+        _tmpVec2.subVectors(_tmpVec, this.camera.position);
+        const distChest = _tmpVec2.length();
+        if (distChest > 0.6 && distChest < bestEnemyDist) {
+          const proj = _tmpVec2.dot(_forward);
+          if (proj > 0) {
+            const perpSq = Math.max(0, distChest * distChest - proj * proj);
+            const hitRadius = isProne ? 0.48 : 0.64;
+            if (perpSq < hitRadius * hitRadius) {
+              const wallHit = intersectSegmentEnvironment(
+                this.camera.position,
+                _tmpVec,
+                this.world.boxColliders,
+                this.world.cylinderColliders
+              );
+              if (!wallHit) {
+                bestEnemyDist = distChest;
+                enemySpotted = true;
+                bestEnemyRef = {
+                  key: `ai:${s.id}`,
+                  pos: s.position.clone(),
+                  name: `${s.rankTitle} ${s.name}`,
+                };
+              }
             }
           }
         }
@@ -4404,41 +5282,74 @@ export class GameEngine {
     }
 
     for (const rp of this.remotePlayers.values()) {
-      if (!rp.alive || rp.faction !== this.playerFaction) {
+      if (!rp.alive) {
         rp.iffSprite.visible = false;
         continue;
       }
-      const d = rp.pos.distanceTo(this.camera.position);
-      const showMarker = d > 1.2 && d < 110;
-      rp.iffSprite.visible = showMarker;
-      if (!showMarker) continue;
-
-      const baseScale = THREE.MathUtils.clamp(0.3 + d * 0.0085, 0.3, 0.76);
-      rp.iffSprite.scale.set(baseScale, baseScale, 1);
-
+      const isAlly = rp.faction === this.playerFaction;
       const rpProne = rp.isProne || rp.isDiving;
-      _tmpVec.set(rp.pos.x, rp.pos.y + (rpProne ? 0.36 : rp.isCrouching ? 0.86 : 1.22), rp.pos.z);
-      _tmpVec2.subVectors(_tmpVec, this.camera.position);
-      const distChest = _tmpVec2.length();
-      if (distChest > 0.5 && distChest < bestDist) {
-        const proj = _tmpVec2.dot(_forward);
-        if (proj > 0) {
-          const perpSq = Math.max(0, distChest * distChest - proj * proj);
-          if (perpSq < 0.56 * 0.56) {
-            const wallHit = intersectSegmentEnvironment(
-              this.camera.position,
-              _tmpVec,
-              this.world.boxColliders,
-              this.world.cylinderColliders
-            );
-            if (!wallHit) {
-              bestDist = distChest;
-              bestKey = `remote:${rp.id}`;
-              bestTarget = {
-                name: rp.name,
-                distance: Math.round(distChest),
-                isHuman: true,
-              };
+
+      if (isAlly) {
+        const d = rp.pos.distanceTo(this.camera.position);
+        const showMarker = d > 1.2 && d < 110;
+        rp.iffSprite.visible = showMarker;
+        if (!showMarker) continue;
+
+        const baseScale = THREE.MathUtils.clamp(0.3 + d * 0.0085, 0.3, 0.76);
+        rp.iffSprite.scale.set(baseScale, baseScale, 1);
+
+        _tmpVec.set(rp.pos.x, rp.pos.y + (rpProne ? 0.36 : rp.isCrouching ? 0.86 : 1.22), rp.pos.z);
+        _tmpVec2.subVectors(_tmpVec, this.camera.position);
+        const distChest = _tmpVec2.length();
+        if (distChest > 0.5 && distChest < bestDist) {
+          const proj = _tmpVec2.dot(_forward);
+          if (proj > 0) {
+            const perpSq = Math.max(0, distChest * distChest - proj * proj);
+            if (perpSq < 0.56 * 0.56) {
+              const wallHit = intersectSegmentEnvironment(
+                this.camera.position,
+                _tmpVec,
+                this.world.boxColliders,
+                this.world.cylinderColliders
+              );
+              if (!wallHit) {
+                bestDist = distChest;
+                bestKey = `remote:${rp.id}`;
+                bestTarget = {
+                  name: rp.name,
+                  distance: Math.round(distChest),
+                  isHuman: true,
+                };
+              }
+            }
+          }
+        }
+      } else {
+        rp.iffSprite.visible = false;
+        _tmpVec.set(rp.pos.x, rp.pos.y + (rpProne ? 0.34 : rp.isCrouching ? 0.84 : 1.18), rp.pos.z);
+        _tmpVec2.subVectors(_tmpVec, this.camera.position);
+        const distChest = _tmpVec2.length();
+        if (distChest > 0.6 && distChest < bestEnemyDist) {
+          const proj = _tmpVec2.dot(_forward);
+          if (proj > 0) {
+            const perpSq = Math.max(0, distChest * distChest - proj * proj);
+            const hitRadius = rpProne ? 0.48 : 0.64;
+            if (perpSq < hitRadius * hitRadius) {
+              const wallHit = intersectSegmentEnvironment(
+                this.camera.position,
+                _tmpVec,
+                this.world.boxColliders,
+                this.world.cylinderColliders
+              );
+              if (!wallHit) {
+                bestEnemyDist = distChest;
+                enemySpotted = true;
+                bestEnemyRef = {
+                  key: `remote:${rp.id}`,
+                  pos: rp.pos.clone(),
+                  name: rp.name,
+                };
+              }
             }
           }
         }
@@ -4446,6 +5357,55 @@ export class GameEngine {
     }
 
     this.aimingAtAlly = bestTarget;
+    this.aimingAtEnemy = !bestTarget && enemySpotted;
+    this.aimingEnemyDist = this.aimingAtEnemy ? Math.round(bestEnemyDist) : null;
+    this.aimedEnemyRef = this.aimingAtEnemy ? bestEnemyRef : null;
+
+    // Laser rangefinder + calibrated vertical ballistic drop ticks when scoping a sniper rifle
+    if (isSniper && this.adsAlpha > 0.45) {
+      const spec = WEAPON_SPECS[this.currentWeaponId];
+      let rangeM = this.aimingAtEnemy ? bestEnemyDist : 240;
+      const rayEnd = _tmpVec.copy(this.camera.position).addScaledVector(_forward, rangeM);
+      const envHit = intersectSegmentEnvironment(
+        this.camera.position,
+        rayEnd,
+        this.world.boxColliders,
+        this.world.cylinderColliders
+      );
+      if (envHit) {
+        rangeM = Math.min(rangeM, envHit.point.distanceTo(this.camera.position));
+      } else if (!this.aimingAtEnemy) {
+        // March along center ray to sample ground elevation distance for hills/ridges
+        for (let stepD = 12; stepD <= 230; stepD += 8) {
+          const rx = this.camera.position.x + _forward.x * stepD;
+          const ry = this.camera.position.y + _forward.y * stepD;
+          const rz = this.camera.position.z + _forward.z * stepD;
+          if (ry <= groundHeightAt(rx, rz)) {
+            rangeM = stepD;
+            break;
+          }
+        }
+      }
+      this.scopeRangeMeters = Math.round(rangeM);
+      this.scopeDropSvgUnits = this.computeBulletDropSvgUnits(
+        rangeM,
+        spec.muzzleVelocity,
+        spec.airDrag
+      );
+      this.scopeDropTicks = [75, 125, 175, 225].map((dist) => ({
+        dist,
+        ySvg: Number(
+          (
+            100 +
+            this.computeBulletDropSvgUnits(dist, spec.muzzleVelocity, spec.airDrag)
+          ).toFixed(2)
+        ),
+      }));
+    } else {
+      this.scopeRangeMeters = null;
+      this.scopeDropSvgUnits = 0;
+      this.scopeDropTicks = [];
+    }
 
     // Highlight targeted ally IFF sprite in amber/red when under player's crosshair
     for (let i = 0; i < this.soldiers.length; i++) {
@@ -4594,6 +5554,51 @@ export class GameEngine {
         this.speech.speak(ackLine, this.playerFaction, true, dist);
       }
     }
+
+    // Track active single-subordinate ELIMINATE lock onto living enemy target
+    if (this.activeEliminateSubId !== null) {
+      const assignedSub = this.soldiers.find((s) => s.id === this.activeEliminateSubId);
+      if (!assignedSub || !assignedSub.alive || assignedSub.tacticalOrder !== 'eliminate') {
+        if (this.activeEliminateTargetName) {
+          this.pushRadioBanner(`CIBLE NEUTRALISÉE : ${this.activeEliminateTargetName}`);
+        }
+        this.activeEliminateSubId = null;
+        this.activeEliminateTargetKey = null;
+        this.activeEliminateTargetName = null;
+        this.orderMarkerTimer = 0;
+        this.orderMarkerGroup.visible = false;
+      } else if (this.activeEliminateTargetKey) {
+        let tx = 0;
+        let ty = 0;
+        let tz = 0;
+        let foundTarget = false;
+        if (this.activeEliminateTargetKey.startsWith('ai:')) {
+          const tid = Number(this.activeEliminateTargetKey.slice(3));
+          const ts = this.soldiers.find((s) => s.id === tid && s.alive);
+          if (ts) {
+            tx = ts.position.x;
+            ty = ts.position.y;
+            tz = ts.position.z;
+            foundTarget = true;
+          }
+        } else if (this.activeEliminateTargetKey.startsWith('remote:')) {
+          const rid = this.activeEliminateTargetKey.slice(7);
+          const rp = this.remotePlayers.get(rid);
+          if (rp && rp.alive) {
+            tx = rp.pos.x;
+            ty = rp.pos.y;
+            tz = rp.pos.z;
+            foundTarget = true;
+          }
+        }
+        if (foundTarget) {
+          this.orderMarkerGroup.position.set(tx, ty + 0.06, tz);
+          this.orderMarkerGroup.visible = true;
+          this.orderMarkerTimer = Math.max(this.orderMarkerTimer, 0.25);
+        }
+      }
+    }
+
     if (this.orderMarkerTimer > 0) {
       this.orderMarkerTimer = Math.max(0, this.orderMarkerTimer - dt);
       this.orderMarkerGroup.rotation.y += dt * 2.4;
@@ -4646,87 +5651,200 @@ export class GameEngine {
     return fallback;
   }
 
+  private findNearestEnemyToPoint(pt: THREE.Vector3, maxRadius: number): { key: string; pos: THREE.Vector3; name: string } | null {
+    let bestDistSq = maxRadius * maxRadius;
+    let best: { key: string; pos: THREE.Vector3; name: string } | null = null;
+    for (let i = 0; i < this.soldiers.length; i++) {
+      const s = this.soldiers[i];
+      if (!s.alive || s.faction === this.playerFaction) continue;
+      const dSq = s.position.distanceToSquared(pt);
+      if (dSq < bestDistSq) {
+        bestDistSq = dSq;
+        best = { key: `ai:${s.id}`, pos: s.position.clone(), name: `${s.rankTitle} ${s.name}` };
+      }
+    }
+    for (const rp of this.remotePlayers.values()) {
+      if (!rp.alive || rp.faction === this.playerFaction) continue;
+      const dSq = rp.pos.distanceToSquared(pt);
+      if (dSq < bestDistSq) {
+        bestDistSq = dSq;
+        best = { key: `remote:${rp.id}`, pos: rp.pos.clone(), name: rp.name };
+      }
+    }
+    return best;
+  }
+
   private issueTacticalOrder(order: TacticalOrderId) {
     if (this.playerHp <= 0 || this.phase !== 'playing') return;
-    this.selectedOrder = order;
+
+    const targetPt = order === 'follow' ? this.playerPos.clone() : this.getAimedWorldPoint(95);
+
+    // Tom Clancy Cross-Com rule:
+    // If aiming directly at an enemy and ordering target/location (or explicitly choosing ELIMINATE),
+    // dispatch STRICTLY ONE subordinate to track & fire continuously until that enemy dies!
+    const triggerSingleEliminate =
+      order === 'eliminate' ||
+      (this.aimedEnemyRef !== null && (order === 'move' || order === 'assault'));
+
+    const effectiveOrder: TacticalOrderId = triggerSingleEliminate ? 'eliminate' : order;
+    this.selectedOrder = effectiveOrder;
     this.audio.playCommandChirp('issue');
 
-    const targetPt = order === 'follow' ? this.playerPos.clone() : this.getAimedWorldPoint(68);
-    let subCount = 0;
-    let firstSubPos: THREE.Vector3 | null = null;
+    const eligibleSubs: SoldierEntity[] = [];
     let seniorOfficer: SoldierEntity | null = null;
-
     for (let i = 0; i < this.soldiers.length; i++) {
       const s = this.soldiers[i];
       if (!s.alive || s.faction !== this.playerFaction) continue;
       if (s.rankLevel < this.playerRankLevel) {
-        s.tacticalOrder = order;
-        s.orderTarget = targetPt.clone();
-        s.orderTimer = 11.0;
-        s.coverPos = null;
-        if (order === 'assault' || order === 'hold') {
-          const ringAngle = subCount * 1.45;
-          const ringRadius = 2.6 + (subCount % 2) * 1.8;
-          const offsetPt = targetPt.clone();
-          offsetPt.x += Math.cos(ringAngle) * ringRadius;
-          offsetPt.z += Math.sin(ringAngle) * ringRadius;
-          offsetPt.y = groundHeightAt(offsetPt.x, offsetPt.z);
-          s.orderTarget = offsetPt;
-          s.routeWaypoints = pickRouteToTarget(s.position, offsetPt);
-          s.waypointIdx = 0;
-        }
-        subCount++;
-        if (!firstSubPos) firstSubPos = s.position.clone();
+        eligibleSubs.push(s);
       } else if (s.rankLevel > this.playerRankLevel && !seniorOfficer) {
         seniorOfficer = s;
       }
     }
 
-    // High-ranked commander issues voice order in Lingala / Swahili
-    const issueLine = pickOrderVoice(this.playerFaction, order, 'issue');
-    this.speech.speak(issueLine, this.playerFaction, true, 0);
-
-    const spec = TACTICAL_ORDERS.find((o) => o.id === order)!;
-    if (subCount > 0) {
-      this.activeOrder = order;
-      this.activeOrderTimer = 11.0;
-      this.pendingAckOrder = order;
-      this.orderAckTimer = 1.05;
-      if (firstSubPos) this.orderAckSpeakerPos.copy(firstSubPos);
-
-      if (order !== 'follow') {
-        const ringColor = this.playerFaction === 'army' ? '#38bdf8' : '#f59e0b';
-        this.orderMarkerGroup.children.forEach((ch) => {
-          ((ch as THREE.Mesh).material as THREE.MeshBasicMaterial).color.set(ringColor);
-        });
-        this.orderMarkerGroup.position.set(targetPt.x, targetPt.y + 0.04, targetPt.z);
-        this.orderMarkerGroup.visible = true;
-        this.orderMarkerTimer = 3.6;
+    if (eligibleSubs.length === 0) {
+      if (seniorOfficer) {
+        this.pendingAckOrder = null;
+        this.orderAckTimer = 0;
+        this.speech.speak(pickSeniorRefusalVoice(this.playerFaction), this.playerFaction, true, 12);
+        this.pushRadioBanner(
+          `GRADE INSUFFISANT — ${seniorOfficer.name} (${seniorOfficer.rankTitle}) EST SUPÉRIEUR`
+        );
+      } else {
+        if (this.lanRoomCode) {
+          this.lan.sendOrder(effectiveOrder, { x: targetPt.x, y: targetPt.y, z: targetPt.z });
+        }
+        this.pushRadioBanner('AUCUN SUBORDONNÉ DE GRADE INFÉRIEUR EN VIE');
       }
+      return;
+    }
+
+    if (effectiveOrder === 'eliminate') {
+      const lockedEnemy = this.aimedEnemyRef ?? this.findNearestEnemyToPoint(targetPt, 22);
+      if (!lockedEnemy) {
+        this.pushRadioBanner('AUCUN ENNEMI VERROUILLÉ SOUS LE VISEUR');
+        return;
+      }
+
+      // Pick STRICTLY ONE subordinate (prefer free subordinate with best LOS/proximity to target)
+      let chosenSub: SoldierEntity = eligibleSubs[0];
+      let bestScore = -1e9;
+      for (const sub of eligibleSubs) {
+        let score = 0;
+        if (sub.tacticalOrder !== 'eliminate') score += 100;
+        const distToEnemy = sub.position.distanceTo(lockedEnemy.pos);
+        score -= distToEnemy * 0.85;
+        const fromEye = new THREE.Vector3(sub.position.x, sub.position.y + 1.25, sub.position.z);
+        const toEye = new THREE.Vector3(lockedEnemy.pos.x, lockedEnemy.pos.y + 1.2, lockedEnemy.pos.z);
+        if (hasLineOfSight(fromEye, toEye, this.world.boxColliders, this.world.cylinderColliders)) {
+          score += 55;
+        }
+        if (score > bestScore) {
+          bestScore = score;
+          chosenSub = sub;
+        }
+      }
+
+      chosenSub.tacticalOrder = 'eliminate';
+      chosenSub.targetEnemyKey = lockedEnemy.key;
+      chosenSub.orderTarget = lockedEnemy.pos.clone();
+      chosenSub.orderTimer = 45.0;
+
+      this.activeEliminateSubId = chosenSub.id;
+      this.activeEliminateTargetKey = lockedEnemy.key;
+      this.activeEliminateTargetName = lockedEnemy.name;
+
+      const issueLine = pickOrderVoice(this.playerFaction, 'eliminate', 'issue');
+      this.speech.speak(issueLine, this.playerFaction, true, 0);
+
+      this.activeOrder = 'eliminate';
+      this.activeOrderTimer = 14.0;
+      this.pendingAckOrder = 'eliminate';
+      this.orderAckTimer = 0.85;
+      this.orderAckSpeakerPos.copy(chosenSub.position);
+
+      this.orderMarkerGroup.children.forEach((ch) => {
+        ((ch as THREE.Mesh).material as THREE.MeshBasicMaterial).color.set('#ef4444');
+      });
+      this.orderMarkerGroup.position.set(lockedEnemy.pos.x, lockedEnemy.pos.y + 0.06, lockedEnemy.pos.z);
+      this.orderMarkerGroup.visible = true;
+      this.orderMarkerTimer = 6.0;
 
       if (this.orderXpCooldown <= 0) {
-        this.awardRankXp(10);
-        this.orderXpCooldown = 4.0;
+        this.awardRankXp(12);
+        this.orderXpCooldown = 3.5;
       }
-      this.dualShock.rumble(0.15, 0.28, 90);
+      this.dualShock.rumble(0.18, 0.34, 110);
       this.pushRadioBanner(
-        `ORDRE [${spec.shortLabel}] → ${subCount} SUBORDONNÉ${subCount > 1 ? 'S' : ''}`
+        `ORDRE [ÉLIMINER] → ${chosenSub.rankTitle} ${chosenSub.name} (1 SUBORDONNÉ → ${lockedEnemy.name})`
       );
       if (this.lanRoomCode) {
-        this.lan.sendOrder(order, { x: targetPt.x, y: targetPt.y, z: targetPt.z });
+        this.lan.sendOrder('eliminate', { x: lockedEnemy.pos.x, y: lockedEnemy.pos.y, z: lockedEnemy.pos.z });
       }
-    } else if (seniorOfficer) {
-      this.pendingAckOrder = null;
-      this.orderAckTimer = 0;
-      this.speech.speak(pickSeniorRefusalVoice(this.playerFaction), this.playerFaction, true, 12);
-      this.pushRadioBanner(
-        `GRADE INSUFFISANT — ${seniorOfficer.name} (${seniorOfficer.rankTitle}) EST SUPÉRIEUR`
-      );
-    } else {
-      if (this.lanRoomCode) {
-        this.lan.sendOrder(order, { x: targetPt.x, y: targetPt.y, z: targetPt.z });
+      return;
+    }
+
+    // Squad Tactical Orders: ASSAUT / À COUVERT / DÉPLACEMENT / SUIVRE
+    let subCount = 0;
+    let firstSubPos: THREE.Vector3 | null = null;
+    for (const s of eligibleSubs) {
+      s.tacticalOrder = effectiveOrder;
+      s.targetEnemyKey = null;
+      s.orderTarget = targetPt.clone();
+      s.orderTimer = effectiveOrder === 'cover' ? 16.0 : 12.0;
+      s.coverPos = null;
+      s.assignedCoverIdx = -1;
+      if (effectiveOrder === 'assault' || effectiveOrder === 'move' || effectiveOrder === 'cover') {
+        const ringAngle = subCount * 1.45;
+        const ringRadius = effectiveOrder === 'cover' ? 3.2 + (subCount % 2) * 2.2 : 2.6 + (subCount % 2) * 1.8;
+        const offsetPt = targetPt.clone();
+        offsetPt.x += Math.cos(ringAngle) * ringRadius;
+        offsetPt.z += Math.sin(ringAngle) * ringRadius;
+        offsetPt.y = groundHeightAt(offsetPt.x, offsetPt.z);
+        s.orderTarget = offsetPt;
+        s.routeWaypoints = pickRouteToTarget(s.position, offsetPt);
+        s.waypointIdx = 0;
       }
-      this.pushRadioBanner('AUCUN SUBORDONNÉ DE GRADE INFÉRIEUR EN VIE');
+      subCount++;
+      if (!firstSubPos) firstSubPos = s.position.clone();
+    }
+
+    const issueLine = pickOrderVoice(this.playerFaction, effectiveOrder, 'issue');
+    this.speech.speak(issueLine, this.playerFaction, true, 0);
+
+    const spec = TACTICAL_ORDERS.find((o) => o.id === effectiveOrder);
+    const shortLabel = spec?.shortLabel ?? 'ESCORTE';
+    this.activeOrder = effectiveOrder;
+    this.activeOrderTimer = 12.0;
+    this.pendingAckOrder = effectiveOrder;
+    this.orderAckTimer = 1.0;
+    if (firstSubPos) this.orderAckSpeakerPos.copy(firstSubPos);
+
+    if (effectiveOrder !== 'follow') {
+      const ringColor =
+        effectiveOrder === 'cover'
+          ? '#10b981'
+          : this.playerFaction === 'army'
+          ? '#38bdf8'
+          : '#f59e0b';
+      this.orderMarkerGroup.children.forEach((ch) => {
+        ((ch as THREE.Mesh).material as THREE.MeshBasicMaterial).color.set(ringColor);
+      });
+      this.orderMarkerGroup.position.set(targetPt.x, targetPt.y + 0.04, targetPt.z);
+      this.orderMarkerGroup.visible = true;
+      this.orderMarkerTimer = 4.0;
+    }
+
+    if (this.orderXpCooldown <= 0) {
+      this.awardRankXp(10);
+      this.orderXpCooldown = 4.0;
+    }
+    this.dualShock.rumble(0.15, 0.28, 90);
+    this.pushRadioBanner(
+      `ORDRE [${shortLabel}] → ${subCount} SUBORDONNÉ${subCount > 1 ? 'S' : ''}`
+    );
+    if (this.lanRoomCode) {
+      this.lan.sendOrder(effectiveOrder, { x: targetPt.x, y: targetPt.y, z: targetPt.z });
     }
   }
 
@@ -4778,6 +5896,17 @@ export class GameEngine {
     }
 
     const activeSectors = this.world.sectors.filter((sec) => sec.active);
+
+    const remoteTargets: RemoteCombatTarget[] = [];
+    for (const rp of this.remotePlayers.values()) {
+      remoteTargets.push({
+        key: `remote:${rp.id}`,
+        position: rp.pos,
+        faction: rp.faction,
+        alive: rp.alive,
+        stance: rp.isProne || rp.isDiving ? 'prone' : rp.isCrouching ? 'crouch' : 'stand',
+      });
+    }
 
     for (let i = 0; i < this.soldiers.length; i++) {
       const soldier = this.soldiers[i];
@@ -4848,7 +5977,7 @@ export class GameEngine {
         this.phase === 'playing' && this.playerHp > 0,
         this.playerFaction,
         activeSectors,
-        this.world.coverPoints,
+        this.world.coverNodes,
         this.world.boxColliders,
         this.world.cylinderColliders,
         this.activeSmokes,
@@ -4899,7 +6028,8 @@ export class GameEngine {
               surface === 'mud' ? '#926341' : '#857859'
             );
           }
-        }
+        },
+        remoteTargets
       );
     }
   }
@@ -4950,15 +6080,21 @@ export class GameEngine {
 
     const deg = (((-this.playerYaw * 180) / Math.PI) % 360 + 360) % 360;
 
-    // Minimap units: allies permanently visible, enemies ONLY within mode radar proximity
+    // Minimap units: allies permanently visible, enemies within radar OR marked by Recon Drone
     const radarRange = modeSpec.enemyRadarRange;
     const ENEMY_PROXIMITY_SQ = radarRange * radarRange;
     const minimapUnits: MinimapUnit[] = [];
+    let aiAllies = 0;
+    let aiEnemies = 0;
+    let subordinatesCount = 0;
+    let droneMarkedCount = 0;
     for (let i = 0; i < this.soldiers.length; i++) {
       const s = this.soldiers[i];
       if (!s.alive) continue;
       const isAlly = s.faction === this.playerFaction;
       if (isAlly) {
+        aiAllies++;
+        if (s.rankLevel < this.playerRankLevel) subordinatesCount++;
         minimapUnits.push({
           id: s.id,
           x: s.position.x,
@@ -4968,9 +6104,12 @@ export class GameEngine {
           rankLevel: s.rankLevel,
         });
       } else {
+        aiEnemies++;
+        const isMarked = s.droneMarkedTimer > 0;
+        if (isMarked) droneMarkedCount++;
         const dx = s.position.x - this.playerPos.x;
         const dz = s.position.z - this.playerPos.z;
-        if (dx * dx + dz * dz <= ENEMY_PROXIMITY_SQ) {
+        if (isMarked || dx * dx + dz * dz <= ENEMY_PROXIMITY_SQ) {
           minimapUnits.push({
             id: s.id,
             x: s.position.x,
@@ -4978,16 +6117,21 @@ export class GameEngine {
             isAlly: false,
             isWounded: false,
             rankLevel: s.rankLevel,
+            marked: isMarked,
           });
         }
       }
     }
 
     let rIdx = 9000;
+    let remoteAllies = 0;
+    let remoteEnemies = 0;
     for (const rp of this.remotePlayers.values()) {
       rIdx++;
       if (!rp.alive) continue;
       const isAlly = rp.faction === this.playerFaction;
+      if (isAlly) remoteAllies++;
+      else remoteEnemies++;
       const dx = rp.pos.x - this.playerPos.x;
       const dz = rp.pos.z - this.playerPos.z;
       if (isAlly || dx * dx + dz * dz <= ENEMY_PROXIMITY_SQ) {
@@ -5003,14 +6147,16 @@ export class GameEngine {
       }
     }
 
-    const remoteAllies = Array.from(this.remotePlayers.values()).filter(
-      (rp) => rp.alive && rp.faction === this.playerFaction
-    ).length;
-    const remoteEnemies = Array.from(this.remotePlayers.values()).filter(
-      (rp) => rp.alive && rp.faction !== this.playerFaction
-    ).length;
-
     const currentZone = findZoneAt(this.playerPos.x, this.playerPos.z);
+    const activeHeadingDeg = this.droneActive
+      ? Math.round(((((-this.droneYaw * 180) / Math.PI) % 360) + 360) % 360)
+      : Math.round(deg);
+    const droneHorizDist = this.droneActive
+      ? Math.round(Math.hypot(this.dronePos.x - this.playerPos.x, this.dronePos.z - this.playerPos.z))
+      : 0;
+    const droneAlt = this.droneActive
+      ? Math.max(1, Math.round(this.dronePos.y - groundHeightAt(this.dronePos.x, this.dronePos.z)))
+      : 0;
 
     this.onHudUpdate({
       phase: this.phase,
@@ -5088,19 +6234,18 @@ export class GameEngine {
       commsFeed: [...this.commsFeed],
       pointerLocked: this.pointerLocked,
       respawnTimer: Math.max(0, this.playerRespawnTimer),
-      aliveAllies:
-        this.soldiers.filter((s) => s.alive && s.faction === this.playerFaction).length +
-        remoteAllies,
-      aliveEnemies:
-        this.soldiers.filter((s) => s.alive && s.faction !== this.playerFaction).length +
-        remoteEnemies,
-      compassHeadingDeg: Math.round(deg),
+      aliveAllies: aiAllies + remoteAllies,
+      aliveEnemies: aiEnemies + remoteEnemies,
+      compassHeadingDeg: activeHeadingDeg,
       weather: this.weather.currentWeather,
       weatherLabel: WEATHER_PRESETS[this.weather.currentWeather].label,
       gamepadConnected: this.padState?.connected ?? false,
       gamepadName: this.padState?.name ?? null,
       gamepadSettings: { ...this.gamepadSettings },
       gamepadSticks: this.padState?.rawAxes ? { ...this.padState.rawAxes } : { lx: 0, ly: 0, rx: 0, ry: 0 },
+      isMobileDevice: this.isMobileDevice,
+      isPortrait: this.isPortrait,
+      isFullscreen: this.isFullscreen,
       isWounded: this.playerHp > 0 && this.playerHp <= 45,
       rankLevel: this.playerRankLevel,
       rankTitle: getRankFromXp(this.playerFaction, this.playerRankXp).title,
@@ -5110,17 +6255,22 @@ export class GameEngine {
       selectedOrder: this.selectedOrder,
       activeOrder: this.activeOrder,
       activeOrderTimer: this.activeOrderTimer,
-      subordinatesCount: this.soldiers.filter(
-        (s) => s.alive && s.faction === this.playerFaction && s.rankLevel < this.playerRankLevel
-      ).length,
-      totalAlliesCount:
-        this.soldiers.filter((s) => s.alive && s.faction === this.playerFaction).length +
-        remoteAllies,
+      subordinatesCount,
+      totalAlliesCount: aiAllies + remoteAllies,
       statusPanelOpen: this.statusPanelOpen,
       commandPanelOpen: this.commandPanelOpen,
-      playerPosX: this.playerPos.x,
-      playerPosZ: this.playerPos.z,
-      playerYaw: this.playerYaw,
+      droneActive: this.droneActive,
+      droneBattery: Math.round(this.droneBattery),
+      droneRangeMeters: droneHorizDist,
+      droneMaxRange: this.droneMaxRange,
+      droneAltitudeMeters: droneAlt,
+      droneMarkedCount,
+      droneAimingEnemy: this.droneAimingEnemy,
+      droneAimingEnemyName: this.droneAimingEnemyName,
+      droneAimingEnemyDist: this.droneAimingEnemyDist,
+      playerPosX: this.droneActive ? this.dronePos.x : this.playerPos.x,
+      playerPosZ: this.droneActive ? this.dronePos.z : this.playerPos.z,
+      playerYaw: this.droneActive ? this.droneYaw : this.playerYaw,
       orderMarkerPos: this.orderMarkerGroup?.visible
         ? { x: this.orderMarkerGroup.position.x, z: this.orderMarkerGroup.position.z }
         : null,
@@ -5137,6 +6287,13 @@ export class GameEngine {
       lanUdpActive: this.lanUdpActive,
       lanUdpPort: this.lanUdpPort,
       aimingAtAlly: this.aimingAtAlly,
+      aimingAtEnemy: this.aimingAtEnemy,
+      aimingEnemyDist: this.aimingEnemyDist,
+      aimingEnemyName: this.aimedEnemyRef?.name ?? null,
+      activeEliminateTargetName: this.activeEliminateTargetName,
+      scopeRangeMeters: this.scopeRangeMeters,
+      scopeDropSvgUnits: this.scopeDropSvgUnits,
+      scopeDropTicks: this.scopeDropTicks,
       friendlyFireWarnTimer: this.friendlyFireWarnTimer,
       killcam: this.killcamHudInfo ? { ...this.killcamHudInfo } : null,
     });
@@ -5154,17 +6311,27 @@ export class GameEngine {
 
       // Poll DualShock controller every frame (works in menus & gameplay!)
       this.padState = this.dualShock.poll();
-      if (this.padState.connected) {
-        if (this.padState.pauseJustPressed) {
-          if (this.phase === 'playing') {
+      if (this.isGamepadActive()) {
+        if (this.armoryOpen) {
+          if (this.padState.menuEvents.length > 0) {
+            for (const ev of this.padState.menuEvents) {
+              this.menuNavListeners.forEach((cb) => cb(ev));
+            }
+          }
+        } else if (this.phase === 'playing') {
+          if (this.padState.pauseJustPressed) {
             this.phase = 'paused';
             this.exitPointerLock();
             this.syncHud();
-          } else if (this.phase === 'paused') {
-            this.resumeGame();
           }
-        } else if (this.phase === 'paused' && this.padState.confirmJustPressed) {
-          this.resumeGame();
+        } else if (this.phase === 'paused' || this.phase === 'victory' || this.phase === 'defeat') {
+          if (this.phase === 'paused' && this.padState.pauseJustPressed) {
+            this.resumeGame();
+          } else if (this.padState.menuEvents.length > 0) {
+            for (const ev of this.padState.menuEvents) {
+              this.menuNavListeners.forEach((cb) => cb(ev));
+            }
+          }
         } else if (this.phase === 'title') {
           if (this.padState.switchCampJustPressed) {
             this.playerFaction = this.playerFaction === 'army' ? 'rebels' : 'army';
@@ -5252,6 +6419,7 @@ export class GameEngine {
                 for (let i = 0; i < this.soldiers.length; i++) {
                   this.soldiers[i].root.visible = false;
                   this.soldiers[i].iffSprite.visible = false;
+                  this.soldiers[i].reconMarkSprite.visible = false;
                 }
                 for (const rp of this.remotePlayers.values()) {
                   rp.root.visible = false;
@@ -5313,7 +6481,7 @@ export class GameEngine {
       this.renderer.render(this.scene, this.camera);
 
       this.hudSyncTimer += dt;
-      if (this.hudSyncTimer >= 0.05) {
+      if (this.hudSyncTimer >= 0.085) {
         this.hudSyncTimer = 0;
         this.syncHud();
       }
@@ -5354,6 +6522,10 @@ export class GameEngine {
     cancelAnimationFrame(this.frameId);
     clearTimeout(this.frameId);
     window.removeEventListener('resize', this.onResize);
+    window.removeEventListener('orientationchange', this.onResize);
+    window.visualViewport?.removeEventListener('resize', this.onResize);
+    window.removeEventListener('pointerdown', this.onMobileFirstGesture, { capture: true });
+    document.removeEventListener('fullscreenchange', this.onFullscreenChange);
     window.removeEventListener('blur', this.onWindowBlur);
     window.removeEventListener('keydown', this.onKeyDown);
     window.removeEventListener('keyup', this.onKeyUp);

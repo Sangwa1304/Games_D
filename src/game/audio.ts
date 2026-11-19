@@ -848,6 +848,33 @@ export class TacticalAudioEngine {
     osc.stop(now + 0.28);
   }
 
+  public playDroneEvent(kind: 'deploy' | 'recall' | 'mark' | 'scan') {
+    if (!this.ctx || !this.sfxGain || this.muted) return;
+    const now = this.ctx.currentTime;
+    const seq =
+      kind === 'deploy'
+        ? [540, 820, 1240]
+        : kind === 'recall'
+        ? [980, 620, 410]
+        : kind === 'mark'
+        ? [1320, 1760]
+        : [920];
+    seq.forEach((freq, i) => {
+      const t = now + i * 0.048;
+      const osc = this.ctx!.createOscillator();
+      osc.type = kind === 'mark' ? 'triangle' : 'sine';
+      osc.frequency.setValueAtTime(freq, t);
+      const g = this.ctx!.createGain();
+      g.gain.setValueAtTime(0.001, t);
+      g.gain.linearRampToValueAtTime(kind === 'mark' ? 0.14 : 0.09, t + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.001, t + 0.075);
+      osc.connect(g);
+      g.connect(this.sfxGain!);
+      osc.start(t);
+      osc.stop(t + 0.085);
+    });
+  }
+
   public dispose() {
     if (this.ctx) {
       this.ctx.close().catch(() => {});

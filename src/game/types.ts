@@ -48,6 +48,7 @@ export type PlayerStance = 'stand' | 'crouch' | 'prone';
 export type StickCurveType = 'linear' | 'dynamic' | 'precision';
 
 export interface GamepadSettings {
+  enabled: boolean; // Toggle DualShock controller active state
   lookSensitivity: number; // 0.8 .. 5.2 rad/s max speed
   adsMultiplier: number; // 0.25 .. 1.15
   stickCurve: StickCurveType;
@@ -58,6 +59,24 @@ export interface GamepadSettings {
   vibration: boolean;
 }
 
+export type GamepadMenuAction =
+  | 'up'
+  | 'down'
+  | 'left'
+  | 'right'
+  | 'tabPrev'
+  | 'tabNext'
+  | 'confirm'
+  | 'back'
+  | 'square'
+  | 'triangle'
+  | 'options';
+
+export interface GamepadMenuEvent {
+  action: GamepadMenuAction;
+  isRepeat: boolean;
+}
+
 export interface MinimapUnit {
   id: number | string;
   x: number;
@@ -66,6 +85,7 @@ export interface MinimapUnit {
   isWounded: boolean;
   rankLevel: number;
   isHuman?: boolean;
+  marked?: boolean;
 }
 
 export interface LanRoomSummary {
@@ -199,6 +219,13 @@ export interface HudSnapshot {
   timeSinceDamage: number;
   isRegenerating: boolean;
   aimingAtAlly: FriendlyFireTarget | null;
+  aimingAtEnemy: boolean;
+  aimingEnemyDist: number | null;
+  aimingEnemyName: string | null;
+  activeEliminateTargetName: string | null;
+  scopeRangeMeters: number | null;
+  scopeDropSvgUnits: number;
+  scopeDropTicks: Array<{ dist: number; ySvg: number }>;
   friendlyFireWarnTimer: number;
   killcam: KillcamHudState | null;
   armyTickets: number;
@@ -229,6 +256,9 @@ export interface HudSnapshot {
   gamepadName: string | null;
   gamepadSettings: GamepadSettings;
   gamepadSticks: { lx: number; ly: number; rx: number; ry: number };
+  isMobileDevice: boolean;
+  isPortrait: boolean;
+  isFullscreen: boolean;
   isWounded: boolean;
   rankLevel: number;
   rankTitle: string;
@@ -248,6 +278,15 @@ export interface HudSnapshot {
   orderMarkerPos: { x: number; z: number } | null;
   minimapUnits: MinimapUnit[];
   minimapEnemyRange: number;
+  droneActive: boolean;
+  droneBattery: number; // 0..100
+  droneRangeMeters: number;
+  droneMaxRange: number;
+  droneAltitudeMeters: number;
+  droneMarkedCount: number;
+  droneAimingEnemy: boolean;
+  droneAimingEnemyName: string | null;
+  droneAimingEnemyDist: number | null;
   lanConnected: boolean;
   lanRoomCode: string | null;
   lanPlayerName: string;
@@ -360,5 +399,16 @@ export interface SmokeCloud {
   radius: number;
   remaining: number;
   maxDuration: number;
+}
+
+export interface CoverNode {
+  id: string;
+  x: number;
+  y: number;
+  z: number;
+  faceX: number;
+  faceZ: number;
+  kind: 'sandbag' | 'barrier' | 'crate' | 'wall';
+  recommendedStance: 'crouch' | 'prone';
 }
 

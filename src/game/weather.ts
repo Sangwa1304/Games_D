@@ -16,6 +16,7 @@ export interface WeatherPreset {
 }
 
 export const WEATHER_ORDER: WeatherType[] = ['clear', 'mist', 'rain', 'storm'];
+const _lightningSkyColor = new THREE.Color(0xdbeafe);
 
 export const WEATHER_PRESETS: Record<WeatherType, WeatherPreset> = {
   clear: {
@@ -203,7 +204,10 @@ export class WeatherController {
 
     // Apply sky, fog & lighting smoothly
     if (scene.background instanceof THREE.Color) {
-      scene.background.copy(this.curSky).lerp(THREE.Color.prototype.setHex.call(new THREE.Color(), 0xdbeafe), flashBoost * 0.42);
+      scene.background.copy(this.curSky);
+      if (flashBoost > 0.001) {
+        scene.background.lerp(_lightningSkyColor, flashBoost * 0.42);
+      }
     }
     if (scene.fog instanceof THREE.FogExp2) {
       scene.fog.color.copy(scene.background as THREE.Color);

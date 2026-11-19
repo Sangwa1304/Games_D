@@ -386,18 +386,18 @@ export function createProceduralTexturePack(renderer: THREE.WebGLRenderer): Proc
   const walnutWood = track(finalizeTexture(wwC, true, 1, 1, maxAniso));
 
   // 8b. Stippled Matte Black Tactical Polymer (M4, HK416, FAMAS, SG552, VSS suppressor)
-  const [wpC, wpCtx] = makeCanvas(256, 256);
-  wpCtx.fillStyle = '#1e2124';
-  wpCtx.fillRect(0, 0, 256, 256);
+  const [polyC, polyCtx] = makeCanvas(256, 256);
+  polyCtx.fillStyle = '#1e2124';
+  polyCtx.fillRect(0, 0, 256, 256);
   const randWP = seededRand(4109);
   for (let y = 0; y < 256; y += 4) {
     for (let x = 0; x < 256; x += 4) {
       const s = 22 + Math.floor(randWP() * 24);
-      wpCtx.fillStyle = `rgb(${s},${s + 1},${s + 2})`;
-      wpCtx.fillRect(x, y, 3, 3);
+      polyCtx.fillStyle = `rgb(${s},${s + 1},${s + 2})`;
+      polyCtx.fillRect(x, y, 3, 3);
     }
   }
-  const weaponPolymerBlack = track(finalizeTexture(wpC, true, 2, 2, maxAniso));
+  const weaponPolymerBlack = track(finalizeTexture(polyC, true, 2, 2, maxAniso));
 
   // 8c. FDE Desert Sand Ceramic Alloy (SCAR-L, MK20 SSR)
   const [fdC, fdCtx] = makeCanvas(256, 256);

@@ -1,8 +1,10 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Check,
   Crosshair,
   Flame,
+  Gamepad2,
+  Lock,
   Rocket,
   Shield,
   Target,
@@ -10,7 +12,13 @@ import {
   X,
   ZoomIn,
 } from 'lucide-react';
-import { Faction, WeaponCategory, WeaponId, WeaponSpec } from '../game/types';
+import {
+  Faction,
+  GamepadMenuEvent,
+  WeaponCategory,
+  WeaponId,
+  WeaponSpec,
+} from '../game/types';
 import {
   DEFAULT_ARMY_LOADOUT,
   DEFAULT_REBEL_LOADOUT,
@@ -22,6 +30,9 @@ import {
 interface ArmoryModalProps {
   loadout: WeaponId[];
   faction: Faction;
+  gamepadNavActive: boolean;
+  subscribeGamepadNav: (cb: (ev: GamepadMenuEvent) => void) => () => void;
+  onGamepadRumble?: (strong?: boolean) => void;
   onSaveLoadout: (nextLoadout: WeaponId[]) => void;
   onClose: () => void;
 }
@@ -237,49 +248,125 @@ const WeaponSilhouetteSvg: React.FC<{ weapon: WeaponSpec; className?: string }> 
 export const ArmoryModal: React.FC<ArmoryModalProps> = ({
   loadout,
   faction,
+  gamepadNavActive,
+  subscribeGamepadNav,
+  onGamepadRumble,
   onSaveLoadout,
   onClose,
 }) => {
   const [draft, setDraft] = useState<WeaponId[]>(() =>
     loadout.slice(0, MAX_LOADOUT_SIZE)
   );
-  const [activeSlot, setActiveSlot] = useState<number>(0);
   const [activeTab, setActiveTab] = useState<WeaponCategory>('assault');
+  const [focusedWeaponIdx, setFocusedWeaponIdx] = useState<number>(0);
+  const [pendingWeapon, setPendingWeapon] = useState<WeaponSpec | null>(null);
+  const [focusedSlotIdx, setFocusedSlotIdx] = useState<number>(0);
+  const [validationNotice, setValidationNotice] = useState<string | null>(null);
 
+  const cardRefs = useRef<Array<HTMLDivElement | null>>([]);
   const categoryWeapons = getWeaponsByCategory(activeTab);
 
-  const handleEquipOrToggle = (id: WeaponId) => {
-    const existingIdx = draft.indexOf(id);
-    if (existingIdx !== -1) {
-      if (draft.length > 1) {
-        const next = draft.filter((w) => w !== id);
-        setDraft(next);
-        setActiveSlot((prev) => Math.min(prev, next.length - 1));
+  useEffect(() => {
+    setFocusedWeaponIdx(0);
+  }, [activeTab]);
+
+  useEffect(() => {
+    if (!gamepadNavActive) return;
+    if (document.activeElement instanceof HTMLElement) {
+      document.activeElement.blur();
+    }
+    const blockKeys = (e: KeyboardEvent) => {
+      const blocked = [
+        'Tab',
+        'ArrowUp',
+        'ArrowDown',
+        'ArrowLeft',
+        'ArrowRight',
+        'Enter',
+        'Space',
+        'Escape',
+        'KeyB',
+      ];
+      if (blocked.includes(e.code)) {
+        e.preventDefault();
+        e.stopPropagation();
       }
-      return;
+    };
+    window.addEventListener('keydown', blockKeys, { capture: true });
+    return () => window.removeEventListener('keydown', blockKeys, { capture: true });
+  }, [gamepadNavActive]);
+
+  useEffect(() => {
+    if (!gamepadNavActive || pendingWeapon) return;
+    const card = cardRefs.current[focusedWeaponIdx];
+    if (card) {
+      card.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+  }, [focusedWeaponIdx, gamepadNavActive, activeTab, pendingWeapon]);
+
+  useEffect(() => {
+    if (!validationNotice) return;
+    const t = window.setTimeout(() => setValidationNotice(null), 2400);
+    return () => window.clearTimeout(t);
+  }, [validationNotice]);
+
+  const openSlotPicker = (weapon: WeaponSpec) => {
+    const existingIdx = draft.indexOf(weapon.id);
+    setFocusedSlotIdx(existingIdx !== -1 ? existingIdx : 0);
+    setPendingWeapon(weapon);
+  };
+
+  const confirmSlotSelection = (slotIdx: number) => {
+    if (!pendingWeapon) return;
+    const next = [...draft];
+    const existingIdx = next.indexOf(pendingWeapon.id);
+
+    let finalSlot = slotIdx;
+    if (existingIdx !== -1) {
+      if (slotIdx < next.length) {
+        const displaced = next[slotIdx];
+        next[slotIdx] = pendingWeapon.id;
+        next[existingIdx] = displaced;
+      } else {
+        // Move to end if targeting a currently empty slot beyond draft.length
+        next.splice(existingIdx, 1);
+        next.push(pendingWeapon.id);
+        finalSlot = next.length - 1;
+      }
+    } else if (slotIdx < next.length) {
+      next[slotIdx] = pendingWeapon.id;
+    } else if (next.length < MAX_LOADOUT_SIZE) {
+      next.push(pendingWeapon.id);
+      finalSlot = next.length - 1;
+    } else {
+      next[MAX_LOADOUT_SIZE - 1] = pendingWeapon.id;
+      finalSlot = MAX_LOADOUT_SIZE - 1;
     }
 
-    if (draft.length < MAX_LOADOUT_SIZE) {
-      const next = [...draft, id];
-      setDraft(next);
-      setActiveSlot(Math.min(MAX_LOADOUT_SIZE - 1, next.length - 1));
-    } else {
-      const targetIdx = Math.min(activeSlot, MAX_LOADOUT_SIZE - 1);
-      const next = [...draft];
-      next[targetIdx] = id;
-      setDraft(next);
-      setActiveSlot((targetIdx + 1) % MAX_LOADOUT_SIZE);
-    }
+    setDraft(next);
+    onSaveLoadout(next);
+    setValidationNotice(`${pendingWeapon.shortName} validée sur l'Emplacement [${finalSlot + 1}]`);
+    setPendingWeapon(null);
   };
 
   const handleRemoveSlot = (idx: number) => {
     if (draft.length <= 1) return;
     const next = draft.filter((_, i) => i !== idx);
     setDraft(next);
-    setActiveSlot(Math.min(activeSlot, next.length - 1));
+    onSaveLoadout(next);
   };
 
-  const handleApply = () => {
+  const handleApplyPreset = () => {
+    const preset =
+      faction === 'army' ? [...DEFAULT_ARMY_LOADOUT] : [...DEFAULT_REBEL_LOADOUT];
+    setDraft(preset);
+    onSaveLoadout(preset);
+    setValidationNotice(
+      `Dotation ${faction === 'army' ? 'Armée' : 'Rebelle'} appliquée`
+    );
+  };
+
+  const handleFinish = () => {
     onSaveLoadout(draft);
     onClose();
   };
@@ -287,39 +374,166 @@ export const ArmoryModal: React.FC<ArmoryModalProps> = ({
   const presetLoadout =
     faction === 'army' ? DEFAULT_ARMY_LOADOUT : DEFAULT_REBEL_LOADOUT;
 
+  const navStateRef = useRef({
+    activeTab,
+    focusedWeaponIdx,
+    categoryWeapons,
+    draft,
+    presetLoadout,
+    pendingWeapon,
+    focusedSlotIdx,
+    openSlotPicker,
+    confirmSlotSelection,
+    handleApplyPreset,
+    handleFinish,
+    onClose,
+    onGamepadRumble,
+  });
+  navStateRef.current = {
+    activeTab,
+    focusedWeaponIdx,
+    categoryWeapons,
+    draft,
+    presetLoadout,
+    pendingWeapon,
+    focusedSlotIdx,
+    openSlotPicker,
+    confirmSlotSelection,
+    handleApplyPreset,
+    handleFinish,
+    onClose,
+    onGamepadRumble,
+  };
+
+  useEffect(() => {
+    if (!gamepadNavActive) return;
+    return subscribeGamepadNav((ev) => {
+      const s = navStateRef.current;
+
+      // Sub-menu: Slot Selection Dialog active
+      if (s.pendingWeapon) {
+        if (ev.action === 'left' || ev.action === 'up' || ev.action === 'tabPrev') {
+          setFocusedSlotIdx((prev) => (prev + 2) % MAX_LOADOUT_SIZE);
+          s.onGamepadRumble?.(false);
+          return;
+        }
+        if (ev.action === 'right' || ev.action === 'down' || ev.action === 'tabNext') {
+          setFocusedSlotIdx((prev) => (prev + 1) % MAX_LOADOUT_SIZE);
+          s.onGamepadRumble?.(false);
+          return;
+        }
+        if (ev.action === 'confirm') {
+          s.onGamepadRumble?.(true);
+          s.confirmSlotSelection(s.focusedSlotIdx);
+          return;
+        }
+        if (ev.action === 'back' || ev.action === 'options') {
+          s.onGamepadRumble?.(false);
+          setPendingWeapon(null);
+          return;
+        }
+        return;
+      }
+
+      const tabOrder: WeaponCategory[] = ['assault', 'sniper', 'destruction'];
+      const count = s.categoryWeapons.length;
+
+      if (ev.action === 'tabPrev' || ev.action === 'tabNext') {
+        const idx = tabOrder.indexOf(s.activeTab);
+        const dir = ev.action === 'tabNext' ? 1 : -1;
+        setActiveTab(tabOrder[(idx + dir + tabOrder.length) % tabOrder.length]);
+        s.onGamepadRumble?.(false);
+        return;
+      }
+      if (ev.action === 'back' || ev.action === 'options' || ev.action === 'triangle') {
+        s.onGamepadRumble?.(true);
+        s.handleFinish();
+        return;
+      }
+      if (ev.action === 'square') {
+        s.onGamepadRumble?.(true);
+        s.handleApplyPreset();
+        return;
+      }
+      if (ev.action === 'left' || ev.action === 'right') {
+        const delta = ev.action === 'left' ? -1 : 1;
+        setFocusedWeaponIdx((prev) => (prev + delta + count) % count);
+        s.onGamepadRumble?.(false);
+        return;
+      }
+      if (ev.action === 'up' || ev.action === 'down') {
+        const step = ev.action === 'up' ? -2 : 2;
+        setFocusedWeaponIdx((prev) => {
+          const next = prev + step;
+          if (next < 0) return Math.max(0, count - 1);
+          if (next >= count) return 0;
+          return next;
+        });
+        s.onGamepadRumble?.(false);
+        return;
+      }
+      if (ev.action === 'confirm') {
+        const w = s.categoryWeapons[s.focusedWeaponIdx];
+        if (w) {
+          s.onGamepadRumble?.(true);
+          s.openSlotPicker(w);
+        }
+      }
+    });
+  }, [gamepadNavActive, subscribeGamepadNav]);
+
   return (
-    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/82 p-3 sm:p-5 overflow-y-auto">
-      <div className="w-full max-w-5xl rounded-xl bg-[#0f1612] border border-stone-700 shadow-2xl overflow-hidden flex flex-col max-h-[92vh]">
-        {/* Header */}
-        <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3 bg-[#0a100c] border-b border-stone-800">
-          <div>
-            <div className="text-[10.5px] font-bold uppercase tracking-[0.2em] text-amber-400">
-              Armurerie Tactique · Vallée du Kivu
+    <div
+      className={`fixed inset-0 z-40 flex items-center justify-center bg-black/84 p-2 sm:p-4 ${
+        gamepadNavActive ? 'pointer-events-none select-none cursor-none' : ''
+      }`}
+    >
+      <div className="relative w-full max-w-5xl rounded-xl bg-[#0f1612] border border-stone-700 shadow-2xl overflow-hidden flex flex-col h-[94dvh] max-h-[94dvh]">
+        {/* Compact Top Header */}
+        <div className="shrink-0 flex flex-wrap items-center justify-between gap-2 px-3 sm:px-4 py-2 bg-[#0a100c] border-b border-stone-800">
+          <div className="min-w-0">
+            <div className="text-[9.5px] font-bold uppercase tracking-[0.18em] text-amber-400">
+              Armurerie Tactique · 3 Armes Max (1 · 2 · 3)
             </div>
-            <h2 className="text-lg font-black tracking-wide text-stone-100">
-              Sélection d&apos;Équipement (3 Armes Max · Touches 1 · 2 · 3)
+            <h2 className="text-sm sm:text-base font-black tracking-wide text-stone-100 truncate">
+              Choisissez une arme puis son emplacement
             </h2>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5 shrink-0">
+            {gamepadNavActive && (
+              <span className="inline-flex items-center gap-1 px-2 py-1 rounded bg-[#0c1a24] border border-sky-700 text-[10px] font-bold text-sky-200">
+                <Lock className="w-3 h-3 text-sky-400" />
+                Manette
+              </span>
+            )}
             <button
               type="button"
-              onClick={() => setDraft([...presetLoadout])}
-              className="px-2.5 py-1.5 rounded bg-stone-800 hover:bg-stone-700 border border-stone-600 text-[11px] font-bold text-stone-200 cursor-pointer"
+              tabIndex={gamepadNavActive ? -1 : 0}
+              onClick={() => {
+                if (!gamepadNavActive) handleApplyPreset();
+              }}
+              className="px-2.5 py-1 rounded bg-stone-800 hover:bg-stone-700 border border-stone-600 text-[10.5px] font-bold text-stone-200 cursor-pointer whitespace-nowrap shrink-0"
             >
-              Dotation {faction === 'army' ? 'Armée' : 'Rebelle'}
+              Dotation {faction === 'army' ? 'Armée' : 'Rebelle'} {gamepadNavActive ? '[□]' : ''}
             </button>
             <button
               type="button"
-              onClick={handleApply}
-              className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded bg-amber-600 hover:bg-amber-500 text-stone-950 font-extrabold text-xs uppercase tracking-wider cursor-pointer"
+              tabIndex={gamepadNavActive ? -1 : 0}
+              onClick={() => {
+                if (!gamepadNavActive) handleFinish();
+              }}
+              className="inline-flex items-center gap-1 px-3 py-1 rounded bg-amber-600 hover:bg-amber-500 text-stone-950 font-extrabold text-[11px] uppercase tracking-wider cursor-pointer whitespace-nowrap shrink-0"
             >
               <Check className="w-3.5 h-3.5" />
-              Valider ({draft.length}/{MAX_LOADOUT_SIZE})
+              Terminer ({draft.length}/{MAX_LOADOUT_SIZE}) {gamepadNavActive ? '[△]' : ''}
             </button>
             <button
               type="button"
-              onClick={onClose}
+              tabIndex={gamepadNavActive ? -1 : 0}
+              onClick={() => {
+                if (!gamepadNavActive) onClose();
+              }}
               aria-label="Fermer l'armurerie"
               className="p-1.5 rounded bg-stone-800 hover:bg-stone-700 border border-stone-700 text-stone-300 cursor-pointer"
             >
@@ -328,87 +542,9 @@ export const ArmoryModal: React.FC<ArmoryModalProps> = ({
           </div>
         </div>
 
-        {/* Active 3-Weapon Loadout Strip */}
-        <div className="px-4 py-2.5 bg-[#0c120e] border-b border-stone-800 space-y-1.5">
-          <div className="flex items-center justify-between text-[10.5px] font-bold uppercase tracking-wider text-stone-400">
-            <span>
-              Emplacements Équipés ({draft.length} / {MAX_LOADOUT_SIZE} Maximum)
-            </span>
-            <span className="text-amber-300/90">
-              Cliquez sur un emplacement puis sur une arme ci-dessous pour la remplacer
-            </span>
-          </div>
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-            {[0, 1, 2].map((slotIdx) => {
-              const wid = draft[slotIdx];
-              const spec = wid ? WEAPON_SPECS[wid] : null;
-              const isTarget = activeSlot === slotIdx;
-              return (
-                <div
-                  key={slotIdx}
-                  onClick={() => setActiveSlot(slotIdx)}
-                  role="button"
-                  tabIndex={0}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') setActiveSlot(slotIdx);
-                  }}
-                  className={`p-2 rounded-lg border transition-colors cursor-pointer ${
-                    isTarget
-                      ? 'bg-[#18261d] border-amber-500 shadow-[0_0_0_1px_rgba(245,158,11,0.35)]'
-                      : 'bg-[#101813] border-stone-700/80 hover:border-stone-500'
-                  }`}
-                >
-                  <div className="flex items-center justify-between gap-2 mb-1">
-                    <span className="text-[10px] font-black uppercase tracking-wider text-amber-300">
-                      Touche [{slotIdx + 1}] {isTarget ? '· Cible' : ''}
-                    </span>
-                    {spec && draft.length > 1 && (
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleRemoveSlot(slotIdx);
-                        }}
-                        title="Retirer cette arme"
-                        className="p-0.5 rounded hover:bg-red-950/70 text-stone-400 hover:text-red-300 cursor-pointer"
-                      >
-                        <Trash2 className="w-3 h-3" />
-                      </button>
-                    )}
-                  </div>
-                  {spec ? (
-                    <div className="flex items-center gap-2.5">
-                      <div className="w-24 shrink-0 bg-[#080d0a] rounded px-1.5 py-0.5 border border-stone-800">
-                        <WeaponSilhouetteSvg weapon={spec} className="w-full h-8" />
-                      </div>
-                      <div className="min-w-0">
-                        <div className="text-xs font-extrabold text-stone-100 truncate">
-                          {spec.shortName}
-                        </div>
-                        <div className="text-[10px] text-stone-400 truncate">
-                          {spec.caliber} · {spec.finishLabel}
-                        </div>
-                        {spec.zoomLabels && (
-                          <div className="text-[9.5px] font-bold text-sky-300">
-                            Zoom {spec.zoomLabels[0]} / {spec.zoomLabels[1]}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="h-10 flex items-center justify-center text-[11px] text-stone-500 italic">
-                      Emplacement libre — choisir une arme
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* Category Tabs */}
-        <div className="px-4 pt-3 pb-2 bg-[#0f1612] border-b border-stone-800/80">
-          <div className="grid grid-cols-3 gap-2">
+        {/* Compact Category Tabs + Slim 3-Slot Summary Row (Leaves ~75%+ height for Weapon Grid) */}
+        <div className="shrink-0 px-3 sm:px-4 py-1.5 bg-[#0c120e] border-b border-stone-800/90 space-y-1.5">
+          <div className="grid grid-cols-3 gap-1.5">
             {CATEGORY_TABS.map((tab) => {
               const active = activeTab === tab.id;
               return (
@@ -416,37 +552,70 @@ export const ArmoryModal: React.FC<ArmoryModalProps> = ({
                   key={tab.id}
                   type="button"
                   onClick={() => setActiveTab(tab.id)}
-                  className={`px-3 py-2 rounded-lg border text-left transition-colors cursor-pointer ${
+                  className={`px-2.5 py-1.5 rounded-lg border text-left transition-colors cursor-pointer flex items-center justify-between gap-1 ${
                     active
                       ? 'bg-[#1a281f] border-amber-500 text-amber-200'
                       : 'bg-[#0b110d] border-stone-800 text-stone-300 hover:border-stone-600'
                   }`}
                 >
-                  <div className="flex items-center justify-between gap-1.5">
-                    <span className="inline-flex items-center gap-1.5 text-xs font-extrabold uppercase tracking-wide">
-                      {tab.id === 'assault' && <Shield className="w-3.5 h-3.5 text-emerald-400" />}
-                      {tab.id === 'sniper' && <Target className="w-3.5 h-3.5 text-sky-400" />}
-                      {tab.id === 'destruction' && <Flame className="w-3.5 h-3.5 text-orange-400" />}
-                      {tab.label}
-                    </span>
-                    <span className="text-[11px] font-black tabular-nums px-1.5 py-0.5 rounded bg-stone-900 border border-stone-700 text-stone-200">
-                      {tab.count}
-                    </span>
-                  </div>
-                  <div className="text-[10px] text-stone-400 truncate mt-0.5">
-                    {tab.subtitle}
-                  </div>
+                  <span className="inline-flex items-center gap-1.5 text-[11px] font-extrabold uppercase tracking-wide truncate">
+                    {tab.id === 'assault' && <Shield className="w-3.5 h-3.5 text-emerald-400 shrink-0" />}
+                    {tab.id === 'sniper' && <Target className="w-3.5 h-3.5 text-sky-400 shrink-0" />}
+                    {tab.id === 'destruction' && <Flame className="w-3.5 h-3.5 text-orange-400 shrink-0" />}
+                    <span className="truncate">{tab.label}</span>
+                  </span>
+                  <span className="text-[10.5px] font-black tabular-nums px-1.5 py-0.5 rounded bg-stone-900 border border-stone-700 text-stone-200 shrink-0">
+                    {tab.count}
+                  </span>
                 </button>
               );
             })}
           </div>
+
+          <div className="grid grid-cols-3 gap-1.5 text-[10.5px]">
+            {[0, 1, 2].map((slotIdx) => {
+              const wid = draft[slotIdx];
+              const spec = wid ? WEAPON_SPECS[wid] : null;
+              return (
+                <div
+                  key={slotIdx}
+                  className="px-2 py-1 rounded bg-[#101813] border border-stone-800 flex items-center justify-between gap-1.5 min-w-0"
+                >
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <span className="font-black text-amber-400 shrink-0">[{slotIdx + 1}]</span>
+                    <span className="font-bold text-stone-200 truncate">
+                      {spec ? spec.shortName : 'Libre'}
+                    </span>
+                  </div>
+                  {spec && draft.length > 1 && (
+                    <button
+                      type="button"
+                      onClick={() => handleRemoveSlot(slotIdx)}
+                      title="Libérer cet emplacement"
+                      className="p-0.5 rounded hover:bg-red-950/70 text-stone-400 hover:text-red-300 cursor-pointer shrink-0"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          {validationNotice && (
+            <div className="px-2.5 py-1 rounded bg-emerald-950/90 border border-emerald-500/70 text-[11px] font-bold text-emerald-200 flex items-center gap-1.5">
+              <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+              <span>{validationNotice}</span>
+            </div>
+          )}
         </div>
 
-        {/* Weapon Catalog Grid */}
-        <div className="p-4 overflow-y-auto grid grid-cols-1 md:grid-cols-2 gap-2.5 flex-1">
-          {categoryWeapons.map((w) => {
+        {/* Primary Weapon Catalog Grid — Always Immediately Visible */}
+        <div className="p-3 sm:p-4 flex-1 min-h-0 overflow-y-auto touch-pan-y grid grid-cols-1 sm:grid-cols-2 gap-2.5 content-start">
+          {categoryWeapons.map((w, idx) => {
             const slotIdx = draft.indexOf(w.id);
             const isEquipped = slotIdx !== -1;
+            const isGamepadFocused = gamepadNavActive && !pendingWeapon && focusedWeaponIdx === idx;
 
             const dmgPct =
               w.delivery === 'rocket'
@@ -456,22 +625,38 @@ export const ArmoryModal: React.FC<ArmoryModalProps> = ({
                 : Math.min(100, Math.round((w.damage / 96) * 100));
             const rpmPct =
               w.delivery === 'rocket'
-                ? 12
-                : Math.min(100, Math.round((w.rpm / 900) * 100));
+                ? 10
+                : Math.min(100, Math.round((w.rpm / 1120) * 100));
             const accPct =
               w.delivery === 'flame'
                 ? 42
                 : w.delivery === 'rocket'
                 ? 58
-                : Math.min(100, Math.round(100 - w.adsSpread * 35000));
+                : Math.min(100, Math.round(100 - w.adsSpread * 42000));
 
             return (
               <div
                 key={w.id}
-                className={`p-3 rounded-lg border flex flex-col justify-between gap-2 transition-colors ${
-                  isEquipped
-                    ? 'bg-[#16241b] border-emerald-500/80'
-                    : 'bg-[#0b110d] border-stone-800 hover:border-stone-600'
+                ref={(el) => {
+                  cardRefs.current[idx] = el;
+                }}
+                onClick={() => {
+                  if (!gamepadNavActive) openSlotPicker(w);
+                }}
+                role="button"
+                tabIndex={gamepadNavActive ? -1 : 0}
+                onKeyDown={(e) => {
+                  if (!gamepadNavActive && (e.key === 'Enter' || e.key === ' ')) {
+                    e.preventDefault();
+                    openSlotPicker(w);
+                  }
+                }}
+                className={`p-2.5 sm:p-3 rounded-lg border flex flex-col justify-between gap-2 transition-all cursor-pointer ${
+                  isGamepadFocused
+                    ? 'ring-2 ring-sky-400 border-sky-400 bg-[#12222c] shadow-[0_0_18px_rgba(56,189,248,0.28)]'
+                    : isEquipped
+                    ? 'bg-[#16241b] border-emerald-500/80 hover:border-emerald-400'
+                    : 'bg-[#0b110d] border-stone-800 hover:border-amber-500/80'
                 }`}
               >
                 <div className="flex items-start justify-between gap-2">
@@ -481,19 +666,19 @@ export const ArmoryModal: React.FC<ArmoryModalProps> = ({
                         {w.name}
                       </h3>
                       {w.zoomLabels && (
-                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-sky-950 border border-sky-700 text-[10px] font-bold text-sky-300">
+                        <span className="inline-flex items-center gap-1 text-[10px] font-bold text-sky-300">
                           <ZoomIn className="w-3 h-3" />
                           {w.zoomLabels[0]} / {w.zoomLabels[1]}
                         </span>
                       )}
                       {w.delivery === 'flame' && (
-                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-orange-950 border border-orange-700 text-[10px] font-bold text-orange-300">
+                        <span className="inline-flex items-center gap-1 text-[10px] font-bold text-orange-300">
                           <Flame className="w-3 h-3" />
                           Brûlure
                         </span>
                       )}
                       {w.delivery === 'rocket' && (
-                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-950 border border-amber-700 text-[10px] font-bold text-amber-300">
+                        <span className="inline-flex items-center gap-1 text-[10px] font-bold text-amber-300">
                           <Rocket className="w-3 h-3" />
                           Antichar
                         </span>
@@ -507,40 +692,43 @@ export const ArmoryModal: React.FC<ArmoryModalProps> = ({
 
                   <button
                     type="button"
-                    onClick={() => handleEquipOrToggle(w.id)}
-                    className={`shrink-0 px-3 py-1.5 rounded text-[11px] font-extrabold uppercase tracking-wider cursor-pointer transition-colors ${
+                    tabIndex={-1}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (!gamepadNavActive) openSlotPicker(w);
+                    }}
+                    className={`shrink-0 px-2.5 py-1 rounded text-[10.5px] font-extrabold uppercase tracking-wider cursor-pointer transition-colors whitespace-nowrap ${
                       isEquipped
                         ? 'bg-emerald-600 hover:bg-emerald-500 text-stone-950'
-                        : 'bg-stone-800 hover:bg-amber-600 hover:text-stone-950 text-stone-100 border border-stone-600'
+                        : 'bg-amber-600/90 hover:bg-amber-500 text-stone-950'
                     }`}
                   >
-                    {isEquipped
-                      ? `Empl. [${slotIdx + 1}]`
-                      : draft.length < MAX_LOADOUT_SIZE
-                      ? 'Équiper'
-                      : `Remplacer [${activeSlot + 1}]`}
+                    {isEquipped ? `Empl. [${slotIdx + 1}]` : 'Choisir'}
                   </button>
                 </div>
 
                 <div className="grid grid-cols-12 gap-2.5 items-center">
                   <div className="col-span-5 bg-[#070b08] border border-stone-800/90 rounded-md px-2 py-1">
-                    <WeaponSilhouetteSvg weapon={w} className="w-full h-12" />
+                    <WeaponSilhouetteSvg weapon={w} className="w-full h-11" />
                   </div>
                   <div className="col-span-7 space-y-1 text-[10px] text-stone-300">
                     <div className="flex items-center gap-2">
-                      <span className="w-16 text-stone-400">Dégâts</span>
+                      <span className="w-14 text-stone-400">Dégâts</span>
                       <div className="flex-1 h-1.5 bg-stone-800 rounded overflow-hidden">
                         <div className="h-full bg-red-500" style={{ width: `${dmgPct}%` }} />
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
-                      <span className="w-16 text-stone-400">Cadence</span>
+                      <span className="w-14 text-stone-400">Cadence</span>
                       <div className="flex-1 h-1.5 bg-stone-800 rounded overflow-hidden">
                         <div className="h-full bg-amber-400" style={{ width: `${rpmPct}%` }} />
                       </div>
+                      <span className="w-12 text-right text-[9.5px] font-bold text-amber-300 tabular-nums">
+                        {w.rpm} c/m
+                      </span>
                     </div>
                     <div className="flex items-center gap-2">
-                      <span className="w-16 text-stone-400">Précision</span>
+                      <span className="w-14 text-stone-400">Précision</span>
                       <div className="flex-1 h-1.5 bg-stone-800 rounded overflow-hidden">
                         <div className="h-full bg-sky-400" style={{ width: `${accPct}%` }} />
                       </div>
@@ -548,25 +736,147 @@ export const ArmoryModal: React.FC<ArmoryModalProps> = ({
                   </div>
                 </div>
 
-                <p className="text-[11px] text-stone-400 leading-snug">{w.description}</p>
+                <p className="text-[10.5px] text-stone-400 leading-snug line-clamp-2">{w.description}</p>
               </div>
             );
           })}
         </div>
 
         {/* Bottom Footer */}
-        <div className="px-4 py-2 bg-[#0a100c] border-t border-stone-800 flex flex-wrap items-center justify-between gap-2 text-[11px] text-stone-400">
-          <div className="inline-flex items-center gap-1.5">
-            <Crosshair className="w-3.5 h-3.5 text-sky-400" />
-            <span>
-              Lunettes de précision : utilisez <strong className="text-stone-200">Shift</strong>, la{' '}
-              <strong className="text-stone-200">Molette</strong> ou <strong className="text-sky-300">L3</strong> en visée pour changer de grossissement.
-            </span>
-          </div>
-          <span className="text-amber-300 font-semibold">
-            Raccourci Armurerie en combat : Touche [B]
-          </span>
+        <div className="shrink-0 px-3 sm:px-4 py-1.5 bg-[#0a100c] border-t border-stone-800 flex flex-wrap items-center justify-between gap-2 text-[10.5px] text-stone-400">
+          {gamepadNavActive ? (
+            <div className="inline-flex flex-wrap items-center gap-x-3 gap-y-1 text-sky-200 font-semibold">
+              <span className="inline-flex items-center gap-1 text-sky-300">
+                <Gamepad2 className="w-3.5 h-3.5" />
+                L1/R1 Catégories
+              </span>
+              <span>· Stick G/D-Pad Naviguer</span>
+              <span>· <strong className="text-emerald-300">✕</strong> Choisir l&apos;arme</span>
+              <span>· <strong className="text-stone-200">□</strong> Dotation</span>
+              <span>· <strong className="text-amber-300">△ / ○</strong> Terminer</span>
+            </div>
+          ) : (
+            <>
+              <div className="inline-flex items-center gap-1.5">
+                <Crosshair className="w-3.5 h-3.5 text-sky-400" />
+                <span>
+                  Touchez une arme pour ouvrir la sélection d&apos;emplacement [1], [2] ou [3].
+                </span>
+              </div>
+              <span className="text-amber-300 font-semibold">
+                Raccourci Armurerie : [B]
+              </span>
+            </>
+          )}
         </div>
+
+        {/* Dedicated Slot Selection Sub-Menu (Opens when user chooses a weapon) */}
+        {pendingWeapon && (
+          <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/88 p-3 sm:p-5">
+            <div className="w-full max-w-2xl rounded-xl bg-[#101813] border border-amber-500/80 shadow-2xl overflow-hidden flex flex-col max-h-[90dvh]">
+              <div className="flex items-center justify-between gap-2 px-4 py-2.5 bg-[#0a100c] border-b border-stone-800">
+                <div>
+                  <div className="text-[10px] font-bold uppercase tracking-widest text-amber-400">
+                    Validation de l&apos;arme &amp; emplacement
+                  </div>
+                  <h3 className="text-base font-black text-stone-100">
+                    Choisir l&apos;emplacement pour {pendingWeapon.shortName}
+                  </h3>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!gamepadNavActive) setPendingWeapon(null);
+                  }}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-stone-800 hover:bg-stone-700 border border-stone-600 text-[11px] font-bold text-stone-200 cursor-pointer"
+                >
+                  <X className="w-3.5 h-3.5" />
+                  Annuler {gamepadNavActive ? '[○]' : ''}
+                </button>
+              </div>
+
+              <div className="p-3 sm:p-4 space-y-3 overflow-y-auto">
+                {/* Selected Weapon Preview */}
+                <div className="p-2.5 rounded-lg bg-[#0b110d] border border-stone-800 flex items-center gap-3">
+                  <div className="w-28 sm:w-32 shrink-0 bg-[#070b08] rounded px-2 py-1 border border-stone-800">
+                    <WeaponSilhouetteSvg weapon={pendingWeapon} className="w-full h-10" />
+                  </div>
+                  <div className="min-w-0">
+                    <div className="text-sm font-extrabold text-stone-100 truncate">
+                      {pendingWeapon.name}
+                    </div>
+                    <div className="text-[11px] text-stone-400 mt-0.5 tabular-nums">
+                      {pendingWeapon.caliber} · {pendingWeapon.rpm} c/m · {pendingWeapon.fireMode} ({pendingWeapon.magSize}/{pendingWeapon.reserveMax})
+                    </div>
+                    {pendingWeapon.zoomLabels && (
+                      <div className="text-[10.5px] font-bold text-sky-300 mt-0.5">
+                        Optique {pendingWeapon.zoomLabels[0]} / {pendingWeapon.zoomLabels[1]}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* 3 Emplacement Choice Cards */}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                  {[0, 1, 2].map((slotIdx) => {
+                    const currentId = draft[slotIdx];
+                    const currentSpec = currentId ? WEAPON_SPECS[currentId] : null;
+                    const isSameWeapon = currentId === pendingWeapon.id;
+                    const isPadSlotFocused = gamepadNavActive && focusedSlotIdx === slotIdx;
+
+                    return (
+                      <button
+                        key={slotIdx}
+                        type="button"
+                        onClick={() => {
+                          if (!gamepadNavActive) confirmSlotSelection(slotIdx);
+                        }}
+                        className={`p-3 rounded-lg border text-left transition-all cursor-pointer flex flex-col justify-between gap-2 ${
+                          isPadSlotFocused
+                            ? 'ring-2 ring-sky-400 border-sky-400 bg-[#132530]'
+                            : isSameWeapon
+                            ? 'bg-[#17281e] border-emerald-500'
+                            : 'bg-[#0b110d] border-stone-700 hover:border-amber-500 hover:bg-[#162119]'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-1">
+                          <span className="text-xs font-black uppercase tracking-wider text-amber-300">
+                            Emplacement {slotIdx + 1}
+                          </span>
+                          <span className="text-[10px] font-bold text-stone-400">
+                            Touche [{slotIdx + 1}]
+                          </span>
+                        </div>
+
+                        {currentSpec ? (
+                          <div className="space-y-1">
+                            <div className="bg-[#070b08] rounded px-1.5 py-0.5 border border-stone-800">
+                              <WeaponSilhouetteSvg weapon={currentSpec} className="w-full h-8" />
+                            </div>
+                            <div className="text-xs font-bold text-stone-200 truncate">
+                              {currentSpec.shortName}
+                            </div>
+                            <div className="text-[10px] text-stone-400 truncate">
+                              {isSameWeapon ? 'Déjà dans cet emplacement' : 'Sera remplacée'}
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="h-14 flex items-center justify-center text-xs text-emerald-300 font-semibold border border-dashed border-stone-700 rounded">
+                            Emplacement libre
+                          </div>
+                        )}
+
+                        <div className="w-full py-1.5 rounded bg-amber-600 text-stone-950 font-black text-[11px] uppercase tracking-wider text-center">
+                          Valider ici {isPadSlotFocused ? '[✕]' : ''}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

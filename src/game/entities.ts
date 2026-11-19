@@ -21,6 +21,7 @@ import { getRankDef, TacticalOrderId } from './ranks';
 import {
   ColliderBox,
   ColliderCylinder,
+  CoverNode,
   Faction,
   PlayerStance,
   SectorState,
@@ -28,13 +29,25 @@ import {
   SurfaceType,
   WeaponId,
 } from './types';
-import { isFlameWeapon, isRocketWeapon, isSniperWeapon } from './weapons';
+import { WEAPON_SPECS, isFlameWeapon, isRocketWeapon, isSniperWeapon } from './weapons';
+
+export interface RemoteCombatTarget {
+  key: string;
+  position: THREE.Vector3;
+  faction: Faction;
+  alive: boolean;
+  stance: PlayerStance;
+}
 
 export interface SoldierEntity {
   id: number;
   name: string;
   faction: Faction;
   weaponId: WeaponId;
+  primaryWeaponId: WeaponId;
+  flameBackupId: WeaponId | null;
+  primaryGunGroup: THREE.Group;
+  flameGunGroup: THREE.Group | null;
   root: THREE.Group;
   bodyPivot: THREE.Group;
   headMesh: THREE.Object3D;
@@ -51,7 +64,7 @@ export interface SoldierEntity {
   deathTimer: number;
   fallAngle: number;
   fallAxis: THREE.Vector3;
-  aiState: 'advance' | 'combat' | 'cover' | 'flank';
+  aiState: 'advance' | 'combat' | 'cover' | 'flank' | 'defend';
   targetSectorIdx: number;
   routeWaypoints: THREE.Vector3[];
   waypointIdx: number;
@@ -63,8 +76,13 @@ export interface SoldierEntity {
   stance: PlayerStance;
   isCrouching: boolean;
   flinchTimer: number;
+  underFireTimer: number;
   muzzleFlashTimer: number;
   coverPos: THREE.Vector3 | null;
+  assignedCoverIdx: number;
+  coverStance: 'crouch' | 'prone';
+  tacticalRole: 'rifleman' | 'defender' | 'flanker';
+  flankSign: 1 | -1;
   diveTimer: number;
   proneTimer: number;
   diveDir: THREE.Vector3;
@@ -77,12 +95,17 @@ export interface SoldierEntity {
   rankTitle: string;
   tacticalOrder: TacticalOrderId | null;
   orderTarget: THREE.Vector3 | null;
+  targetEnemyKey: string | null;
   orderTimer: number;
   commandCooldown: number;
   voiceProfile: VoiceProfileId;
   stepParticleCooldown: number;
   iffSprite: THREE.Sprite;
   iffWarnActive: boolean;
+  reconMarkSprite: THREE.Sprite;
+  droneMarkedTimer: number;
+  losScanTimer: number;
+  cachedEnemyKey: string | null;
   burnTimer: number;
   burnTickAccum: number;
   burnAttackerName: string;
@@ -117,6 +140,54 @@ const REBEL_SURNAMES = [
 
 let _iffNormalTex: THREE.CanvasTexture | null = null;
 let _iffWarnTex: THREE.CanvasTexture | null = null;
+let _reconMarkTex: THREE.CanvasTexture | null = null;
+
+export function getReconMarkTexture(): THREE.CanvasTexture {
+  if (_reconMarkTex) return _reconMarkTex;
+  const canvas = document.createElement('canvas');
+  canvas.width = 128;
+  canvas.height = 128;
+  const ctx = canvas.getContext('2d');
+  if (ctx) {
+    ctx.clearRect(0, 0, 128, 128);
+    ctx.shadowColor = 'rgba(0, 0, 0, 0.9)';
+    ctx.shadowBlur = 8;
+
+    // Outer orange-red diamond frame (visible through bushes/thickets)
+    ctx.strokeStyle = '#ff5722';
+    ctx.lineWidth = 7;
+    ctx.beginPath();
+    ctx.moveTo(64, 18);
+    ctx.lineTo(106, 60);
+    ctx.lineTo(64, 102);
+    ctx.lineTo(22, 60);
+    ctx.closePath();
+    ctx.stroke();
+
+    // Inner glowing core diamond
+    ctx.fillStyle = 'rgba(239, 68, 68, 0.88)';
+    ctx.beginPath();
+    ctx.moveTo(64, 38);
+    ctx.lineTo(84, 60);
+    ctx.lineTo(64, 82);
+    ctx.lineTo(44, 60);
+    ctx.closePath();
+    ctx.fill();
+
+    // Downward pointer tick
+    ctx.strokeStyle = '#fde047';
+    ctx.lineWidth = 6;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(64, 106);
+    ctx.lineTo(64, 120);
+    ctx.stroke();
+  }
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  _reconMarkTex = tex;
+  return tex;
+}
 
 export function getAllyIffTexture(warn: boolean): THREE.CanvasTexture {
   if (warn && _iffWarnTex) return _iffWarnTex;
@@ -187,7 +258,8 @@ export function createSoldierMesh(
   faction: Faction,
   tex: ProceduralTexturePack,
   rankLevel = 1,
-  weaponId: WeaponId = 'ak47'
+  weaponId: WeaponId = 'ak47',
+  flameBackupId: WeaponId | null = null
 ): {
   root: THREE.Group;
   bodyPivot: THREE.Group;
@@ -195,6 +267,8 @@ export function createSoldierMesh(
   leftLeg: THREE.Object3D;
   rightLeg: THREE.Object3D;
   armsGroup: THREE.Object3D;
+  primaryGunGroup: THREE.Group;
+  flameGunGroup: THREE.Group | null;
   muzzleFlash: THREE.Mesh;
   burnFxGroup: THREE.Group;
 } {
@@ -298,7 +372,6 @@ export function createSoldierMesh(
 
     const bootFoot = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.09, 0.25), bootMat);
     bootFoot.position.set(0, -0.77, 0.045);
-    bootFoot.castShadow = true;
     legPivot.add(bootFoot);
 
     return legPivot;
@@ -335,7 +408,6 @@ export function createSoldierMesh(
   for (let m = -1; m <= 1; m++) {
     const mp = new THREE.Mesh(new THREE.BoxGeometry(0.085, 0.14, 0.055), pouchMat);
     mp.position.set(m * 0.105, 1.07, 0.155);
-    mp.castShadow = true;
     bodyPivot.add(mp);
   }
 
@@ -463,93 +535,110 @@ export function createSoldierMesh(
   lGlove.position.set(0.09, -0.06, 0.44);
   armsGroup.add(lShoulder, lUpperArm, lGlove);
 
-  // Multi-part Realistic Weapon Silhouette matched to WeaponId
-  const gunGroup = new THREE.Group();
-  gunGroup.position.set(0.14, -0.04, 0.36);
+  const buildExternalGunGroup = (wId: WeaponId, includeBackTank: boolean): THREE.Group => {
+    const g = new THREE.Group();
+    g.position.set(0.14, -0.04, 0.36);
 
-  const isRkt = isRocketWeapon(weaponId);
-  const isFlm = isFlameWeapon(weaponId);
-  const isSnp = isSniperWeapon(weaponId);
-  const isBullpup = weaponId === 'famas' || weaponId === 'aug';
-  const isFde = weaponId === 'scar_l' || weaponId === 'mk20';
+    const isRkt = isRocketWeapon(wId);
+    const isFlm = isFlameWeapon(wId);
+    const isSnp = isSniperWeapon(wId);
+    const isBullpup = wId === 'famas' || wId === 'aug';
+    const isFde = wId === 'scar_l' || wId === 'mk20';
 
-  const wpnMat = isFde
-    ? new THREE.MeshStandardMaterial({ map: tex.weaponFdeTan, roughness: 0.58, metalness: 0.2 })
-    : isFlm || isRkt || weaponId === 'aug' || weaponId === 'awm'
-    ? new THREE.MeshStandardMaterial({ map: tex.weaponOliveMetal, roughness: 0.6, metalness: 0.25 })
-    : steelMat;
+    const wpnMat = isFde
+      ? new THREE.MeshStandardMaterial({ map: tex.weaponFdeTan, roughness: 0.58, metalness: 0.2 })
+      : isFlm || isRkt || wId === 'aug' || wId === 'awm'
+      ? new THREE.MeshStandardMaterial({ map: tex.weaponOliveMetal, roughness: 0.6, metalness: 0.25 })
+      : steelMat;
 
-  if (isRkt) {
-    const tube = new THREE.Mesh(new THREE.CylinderGeometry(0.044, 0.048, 0.92, 12), wpnMat);
-    tube.rotation.x = Math.PI / 2;
-    tube.position.set(0, 0.08, 0.14);
-    gunGroup.add(tube);
-    if (weaponId === 'bazooka') {
-      const warhead = new THREE.Mesh(new THREE.ConeGeometry(0.056, 0.24, 10), wpnMat);
-      warhead.rotation.x = Math.PI / 2;
-      warhead.position.set(0, 0.08, 0.68);
-      gunGroup.add(warhead);
-    }
-  } else if (isFlm) {
-    const manifold = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.075, 0.32), steelMat);
-    gunGroup.add(manifold);
-    const nozzlePipe = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.025, 0.56, 10), steelMat);
-    nozzlePipe.rotation.x = Math.PI / 2;
-    nozzlePipe.position.set(0, 0.015, 0.38);
-    gunGroup.add(nozzlePipe);
-    const fuelTank = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.09, 0.09, 0.38, 12),
-      new THREE.MeshStandardMaterial({ map: tex.weaponHazardYellow, roughness: 0.5, metalness: 0.35 })
-    );
-    fuelTank.position.set(-0.14, 0.12, -0.58);
-    bodyPivot.add(fuelTank);
-  } else {
-    const gunReceiver = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.068, 0.34), wpnMat);
-    gunReceiver.castShadow = true;
-    gunGroup.add(gunReceiver);
+    if (isRkt) {
+      const tube = new THREE.Mesh(new THREE.CylinderGeometry(0.044, 0.048, 0.92, 12), wpnMat);
+      tube.rotation.x = Math.PI / 2;
+      tube.position.set(0, 0.08, 0.14);
+      g.add(tube);
+      if (wId === 'bazooka') {
+        const warhead = new THREE.Mesh(new THREE.ConeGeometry(0.056, 0.24, 10), wpnMat);
+        warhead.rotation.x = Math.PI / 2;
+        warhead.position.set(0, 0.08, 0.68);
+        g.add(warhead);
+      }
+    } else if (isFlm) {
+      const manifold = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.075, 0.32), steelMat);
+      g.add(manifold);
+      const nozzlePipe = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.025, 0.56, 10), steelMat);
+      nozzlePipe.rotation.x = Math.PI / 2;
+      nozzlePipe.position.set(0, 0.015, 0.38);
+      g.add(nozzlePipe);
+      if (includeBackTank) {
+        const fuelTank = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.09, 0.09, 0.38, 12),
+          new THREE.MeshStandardMaterial({ map: tex.weaponHazardYellow, roughness: 0.5, metalness: 0.35 })
+        );
+        fuelTank.position.set(-0.14, 0.12, -0.58);
+        bodyPivot.add(fuelTank);
+      }
+    } else {
+      const gunReceiver = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.068, 0.34), wpnMat);
+      gunReceiver.castShadow = true;
+      g.add(gunReceiver);
 
-    const gunHandguard = new THREE.Mesh(
-      new THREE.BoxGeometry(0.048, 0.052, isSnp ? 0.28 : 0.22),
-      isFde ? wpnMat : faction === 'army' ? bootMat : woodMat
-    );
-    gunHandguard.position.set(0, 0.008, isBullpup ? 0.18 : 0.24);
-    gunGroup.add(gunHandguard);
-
-    const barrelLen = weaponId === 'barrett' ? 0.7 : isSnp ? 0.58 : 0.44;
-    const gunBarrel = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.011, 0.014, barrelLen, 10),
-      steelMat
-    );
-    gunBarrel.rotation.x = Math.PI / 2;
-    gunBarrel.position.set(0, 0.018, 0.2 + barrelLen * 0.45);
-    gunGroup.add(gunBarrel);
-
-    if (isSnp) {
-      const scope = new THREE.Mesh(new THREE.CylinderGeometry(0.019, 0.022, 0.24, 12), steelMat);
-      scope.rotation.x = Math.PI / 2;
-      scope.position.set(0, 0.068, 0.04);
-      gunGroup.add(scope);
-    }
-
-    if (!isBullpup) {
-      const gunStock = new THREE.Mesh(
-        new THREE.BoxGeometry(0.042, 0.08, 0.22),
+      const gunHandguard = new THREE.Mesh(
+        new THREE.BoxGeometry(0.048, 0.052, isSnp ? 0.28 : 0.22),
         isFde ? wpnMat : faction === 'army' ? bootMat : woodMat
       );
-      gunStock.position.set(0, -0.015, -0.25);
-      gunGroup.add(gunStock);
-    }
+      gunHandguard.position.set(0, 0.008, isBullpup ? 0.18 : 0.24);
+      g.add(gunHandguard);
 
-    const gunMag = new THREE.Mesh(new THREE.BoxGeometry(0.032, 0.16, 0.058), steelMat);
-    gunMag.position.set(0, -0.1, isBullpup ? -0.08 : 0.06);
-    gunMag.rotation.x = 0.26;
-    gunGroup.add(gunMag);
+      const barrelLen = wId === 'barrett' ? 0.7 : isSnp ? 0.58 : 0.44;
+      const gunBarrel = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.011, 0.014, barrelLen, 10),
+        steelMat
+      );
+      gunBarrel.rotation.x = Math.PI / 2;
+      gunBarrel.position.set(0, 0.018, 0.2 + barrelLen * 0.45);
+      g.add(gunBarrel);
+
+      if (isSnp) {
+        const scope = new THREE.Mesh(new THREE.CylinderGeometry(0.019, 0.022, 0.24, 12), steelMat);
+        scope.rotation.x = Math.PI / 2;
+        scope.position.set(0, 0.068, 0.04);
+        g.add(scope);
+      }
+
+      if (!isBullpup) {
+        const gunStock = new THREE.Mesh(
+          new THREE.BoxGeometry(0.042, 0.08, 0.22),
+          isFde ? wpnMat : faction === 'army' ? bootMat : woodMat
+        );
+        gunStock.position.set(0, -0.015, -0.25);
+        g.add(gunStock);
+      }
+
+      const gunMag = new THREE.Mesh(new THREE.BoxGeometry(0.032, 0.16, 0.058), steelMat);
+      gunMag.position.set(0, -0.1, isBullpup ? -0.08 : 0.06);
+      gunMag.rotation.x = 0.26;
+      g.add(gunMag);
+    }
+    return g;
+  };
+
+  // Multi-part Realistic Weapon Silhouette matched to WeaponId (+ concealed close-quarters flamethrower if any)
+  const primaryGunGroup = buildExternalGunGroup(weaponId, true);
+  armsGroup.add(primaryGunGroup);
+
+  let flameGunGroup: THREE.Group | null = null;
+  if (flameBackupId && isFlameWeapon(flameBackupId)) {
+    flameGunGroup = buildExternalGunGroup(flameBackupId, !isFlameWeapon(weaponId));
+    flameGunGroup.visible = false;
+    armsGroup.add(flameGunGroup);
   }
 
+  const isFlmPrimary = isFlameWeapon(weaponId);
+  const isSnpPrimary = isSniperWeapon(weaponId);
   const muzzleFlash = new THREE.Mesh(
-    new THREE.ConeGeometry(isFlm ? 0.13 : 0.09, isFlm ? 0.32 : 0.24, 6),
+    new THREE.ConeGeometry(isFlmPrimary ? 0.13 : 0.09, isFlmPrimary ? 0.32 : 0.24, 6),
     new THREE.MeshBasicMaterial({
-      color: isFlm ? '#ff7b1c' : '#ffca55',
+      color: isFlmPrimary ? '#ff7b1c' : '#ffca55',
       transparent: true,
       opacity: 0.9,
       blending: THREE.AdditiveBlending,
@@ -557,11 +646,10 @@ export function createSoldierMesh(
     })
   );
   muzzleFlash.rotation.x = Math.PI / 2;
-  muzzleFlash.position.set(0, 0.018, isSnp ? 0.85 : 0.7);
+  muzzleFlash.position.set(0.14, -0.022, isSnpPrimary ? 1.21 : 1.06);
   muzzleFlash.visible = false;
-  gunGroup.add(muzzleFlash);
+  armsGroup.add(muzzleFlash);
 
-  armsGroup.add(gunGroup);
   bodyPivot.add(armsGroup);
 
   // 10. Animated 3D Body Burn Flames Group (activated when struck by flamethrower!)
@@ -596,6 +684,8 @@ export function createSoldierMesh(
     leftLeg,
     rightLeg,
     armsGroup,
+    primaryGunGroup,
+    flameGunGroup,
     muzzleFlash,
     burnFxGroup,
   };
@@ -874,10 +964,13 @@ export function spawnSoldier(
   const surnames = faction === 'army' ? ARMY_SURNAMES : REBEL_SURNAMES;
   const weaponChoices: WeaponId[] =
     faction === 'army'
-      ? ['carbine', 'hk416', 'scar_l', 'famas', 'aug', 'm24', 'awm', 'at4', 'flamethrower', 'bazooka']
-      : ['ak47', 'ak74m', 'fnfal', 'galil', 'sg552', 'sniper', 'vss', 'barrett', 'bazooka', 'lpo50'];
-  const weaponId = weaponChoices[id % weaponChoices.length];
-  const parts = createSoldierMesh(faction, tex, rankLevel, weaponId);
+      ? ['carbine', 'hk416', 'scar_l', 'famas', 'aug', 'm24', 'awm', 'at4', 'carbine', 'bazooka']
+      : ['ak47', 'ak74m', 'fnfal', 'galil', 'sg552', 'sniper', 'vss', 'barrett', 'bazooka', 'ak47'];
+  const primaryWeaponId = weaponChoices[id % weaponChoices.length];
+  // Soldiers carrying a flamethrower reserve hold their rifle normally and draw the flamethrower ONLY near an enemy
+  const flameBackupId: WeaponId | null =
+    id % 4 === 1 ? (faction === 'army' ? 'flamethrower' : 'lpo50') : null;
+  const parts = createSoldierMesh(faction, tex, rankLevel, primaryWeaponId, flameBackupId);
   const iffMat = new THREE.SpriteMaterial({
     map: getAllyIffTexture(false),
     transparent: true,
@@ -889,6 +982,21 @@ export function spawnSoldier(
   iffSprite.scale.set(0.36, 0.36, 1);
   iffSprite.visible = false;
   parts.root.add(iffSprite);
+
+  const reconMat = new THREE.SpriteMaterial({
+    map: getReconMarkTexture(),
+    transparent: true,
+    opacity: 0.94,
+    depthTest: false,
+    depthWrite: false,
+  });
+  const reconMarkSprite = new THREE.Sprite(reconMat);
+  reconMarkSprite.position.set(0, 2.18, 0);
+  reconMarkSprite.scale.set(0.48, 0.48, 1);
+  reconMarkSprite.renderOrder = 10;
+  reconMarkSprite.visible = false;
+  parts.root.add(reconMarkSprite);
+
   parts.root.position.copy(spawnPos);
   scene.add(parts.root);
 
@@ -912,7 +1020,11 @@ export function spawnSoldier(
     id,
     name: `${rankDef.abbr} ${surnames[id % surnames.length]}`,
     faction,
-    weaponId,
+    weaponId: primaryWeaponId,
+    primaryWeaponId,
+    flameBackupId,
+    primaryGunGroup: parts.primaryGunGroup,
+    flameGunGroup: parts.flameGunGroup,
     root: parts.root,
     bodyPivot: parts.bodyPivot,
     headMesh: parts.headMesh,
@@ -941,8 +1053,18 @@ export function spawnSoldier(
     stance: 'stand',
     isCrouching: false,
     flinchTimer: 0,
+    underFireTimer: 0,
     muzzleFlashTimer: 0,
     coverPos: null,
+    assignedCoverIdx: -1,
+    coverStance: 'crouch',
+    tacticalRole:
+      isSniperWeapon(primaryWeaponId) || id % 4 === 0
+        ? 'defender'
+        : id % 4 === 1
+        ? 'flanker'
+        : 'rifleman',
+    flankSign: id % 2 === 0 ? 1 : -1,
     diveTimer: 0,
     proneTimer: 0,
     diveDir: new THREE.Vector3(0, 0, 1),
@@ -955,12 +1077,17 @@ export function spawnSoldier(
     rankTitle: rankDef.title,
     tacticalOrder: null,
     orderTarget: null,
+    targetEnemyKey: null,
     orderTimer: 0,
     commandCooldown: 4 + Math.random() * 5,
     voiceProfile,
     stepParticleCooldown: Math.random() * 0.3,
     iffSprite,
     iffWarnActive: false,
+    reconMarkSprite,
+    droneMarkedTimer: 0,
+    losScanTimer: (id % 5) * 0.036,
+    cachedEnemyKey: null,
     burnTimer: 0,
     burnTickAccum: 0,
     burnAttackerName: 'Lance-Flamme',
@@ -1018,6 +1145,13 @@ const _aiToTarget = new THREE.Vector3();
 const _aiAim = new THREE.Vector3();
 const _aiEye = new THREE.Vector3();
 const _enemyEye = new THREE.Vector3();
+const _aiThreat = new THREE.Vector3();
+const _aiFlankDir = new THREE.Vector3();
+const _aiFlankAnchor = new THREE.Vector3();
+const _aiMuzzle = new THREE.Vector3();
+const _aiAimDir = new THREE.Vector3();
+const _aiBestEnemy = new THREE.Vector3();
+const _elimTargetPos = new THREE.Vector3();
 
 function isSegmentBlockedBySmoke(
   a: THREE.Vector3,
@@ -1059,6 +1193,122 @@ function isSegmentBlockedBySmoke(
   return false;
 }
 
+function findBestCoverNode(
+  s: SoldierEntity,
+  allSoldiers: SoldierEntity[],
+  coverNodes: CoverNode[],
+  threatPos: THREE.Vector3 | null,
+  anchorPos: THREE.Vector3 | null,
+  maxRadius: number
+): { idx: number; node: CoverNode } | null {
+  if (coverNodes.length === 0) return null;
+  let bestIdx = -1;
+  let bestScore = -1e9;
+  const maxRadSq = maxRadius * maxRadius;
+
+  for (let i = 0; i < coverNodes.length; i++) {
+    const cn = coverNodes[i];
+    const dx = cn.x - s.position.x;
+    const dz = cn.z - s.position.z;
+    const dSq = dx * dx + dz * dz;
+    if (dSq > maxRadSq) continue;
+
+    if (cn.y < WATER_LEVEL - 0.1) continue;
+
+    let score = cn.kind === 'sandbag' ? 30 : cn.kind === 'barrier' ? 18 : 10;
+
+    if (threatPos) {
+      const tx = threatPos.x - cn.x;
+      const tz = threatPos.z - cn.z;
+      const tLenSq = tx * tx + tz * tz;
+      if (tLenSq < 4.0 * 4.0) continue; // Too close to threat
+      const tLen = Math.sqrt(tLenSq);
+      const facingDot = (tx / tLen) * cn.faceX + (tz / tLen) * cn.faceZ;
+      if (facingDot < 0.22) continue; // Exposed side of cover
+      score += facingDot * 38;
+    }
+
+    // Penalize cover already occupied by a living squadmate (anti-stacking)
+    let occupied = false;
+    for (let j = 0; j < allSoldiers.length; j++) {
+      const other = allSoldiers[j];
+      if (other !== s && other.alive && other.faction === s.faction) {
+        if (other.assignedCoverIdx === i) {
+          occupied = true;
+          break;
+        }
+        const odx = other.position.x - cn.x;
+        const odz = other.position.z - cn.z;
+        if (odx * odx + odz * odz < 1.35 * 1.35) {
+          occupied = true;
+          break;
+        }
+      }
+    }
+    if (occupied) score -= 140;
+
+    // Slight hysteresis bonus to keep current assigned sandbag when still valid
+    if (s.assignedCoverIdx === i) score += 10;
+
+    score -= Math.sqrt(dSq) * 1.05;
+    if (anchorPos) {
+      const ax = cn.x - anchorPos.x;
+      const az = cn.z - anchorPos.z;
+      score -= Math.sqrt(ax * ax + az * az) * 0.85;
+    }
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestIdx = i;
+    }
+  }
+
+  return bestIdx >= 0 ? { idx: bestIdx, node: coverNodes[bestIdx] } : null;
+}
+
+function resolveEliminateTarget(
+  targetKey: string,
+  allSoldiers: SoldierEntity[],
+  playerPos: THREE.Vector3,
+  playerAlive: boolean,
+  playerFaction: Faction,
+  shooterFaction: Faction,
+  remoteTargets: RemoteCombatTarget[],
+  outPos: THREE.Vector3
+): boolean {
+  if (targetKey === 'player') {
+    if (!playerAlive || shooterFaction === playerFaction) return false;
+    outPos.set(playerPos.x, playerPos.y + 1.25, playerPos.z);
+    return true;
+  }
+  if (targetKey.startsWith('ai:')) {
+    const id = Number(targetKey.slice(3));
+    for (let i = 0; i < allSoldiers.length; i++) {
+      const t = allSoldiers[i];
+      if (t.id === id) {
+        if (!t.alive || t.faction === shooterFaction) return false;
+        const aimY = t.stance === 'prone' ? 0.36 : t.stance === 'crouch' ? 0.88 : 1.32;
+        outPos.set(t.position.x, t.position.y + aimY, t.position.z);
+        return true;
+      }
+    }
+    return false;
+  }
+  if (targetKey.startsWith('remote:')) {
+    for (let i = 0; i < remoteTargets.length; i++) {
+      const rp = remoteTargets[i];
+      if (rp.key === targetKey) {
+        if (!rp.alive || rp.faction === shooterFaction) return false;
+        const aimY = rp.stance === 'prone' ? 0.36 : rp.stance === 'crouch' ? 0.88 : 1.32;
+        outPos.set(rp.position.x, rp.position.y + aimY, rp.position.z);
+        return true;
+      }
+    }
+    return false;
+  }
+  return false;
+}
+
 export function updateSoldierAI(
   s: SoldierEntity,
   allSoldiers: SoldierEntity[],
@@ -1066,7 +1316,7 @@ export function updateSoldierAI(
   playerAlive: boolean,
   playerFaction: Faction,
   sectors: SectorState[],
-  coverPoints: THREE.Vector3[],
+  coverNodes: CoverNode[],
   boxes: ColliderBox[],
   cylinders: ColliderCylinder[],
   activeSmokes: SmokeCloud[],
@@ -1074,10 +1324,16 @@ export function updateSoldierAI(
   onAiFire: (soldier: SoldierEntity, muzzlePos: THREE.Vector3, aimDir: THREE.Vector3) => void,
   onCallout?: (soldier: SoldierEntity, category: CommsCategory, urgent: boolean) => void,
   onAiOrderIssued?: (commander: SoldierEntity, order: TacticalOrderId) => void,
-  onSoldierStep?: (soldier: SoldierEntity, surface: SurfaceType) => void
+  onSoldierStep?: (soldier: SoldierEntity, surface: SurfaceType) => void,
+  remoteTargets: RemoteCombatTarget[] = []
 ) {
   if (!s.alive) {
     s.tacticalOrder = null;
+    s.targetEnemyKey = null;
+    s.cachedEnemyKey = null;
+    s.droneMarkedTimer = 0;
+    s.reconMarkSprite.visible = false;
+    s.assignedCoverIdx = -1;
     s.deathTimer += dt;
     s.fallAngle = Math.min(Math.PI / 2, s.fallAngle + dt * 6.5);
     s.bodyPivot.rotation.set(s.fallAxis.x * s.fallAngle, 0, s.fallAxis.z * s.fallAngle);
@@ -1118,7 +1374,13 @@ export function updateSoldierAI(
     s.muzzleFlashTimer -= dt;
     if (s.muzzleFlashTimer <= 0) s.muzzleFlash.visible = false;
   }
-  if (s.flinchTimer > 0) s.flinchTimer -= dt;
+  if (s.flinchTimer > 0) {
+    if (s.flinchTimer > 0.12) {
+      s.underFireTimer = 4.5;
+    }
+    s.flinchTimer -= dt;
+  }
+  if (s.underFireTimer > 0) s.underFireTimer = Math.max(0, s.underFireTimer - dt);
   if (s.fireCooldown > 0) s.fireCooldown -= dt;
   if (s.burstPauseTimer > 0) s.burstPauseTimer -= dt;
   if (s.diveCooldown > 0) s.diveCooldown -= dt;
@@ -1126,9 +1388,10 @@ export function updateSoldierAI(
   if (s.commandCooldown > 0) s.commandCooldown -= dt;
   if (s.orderTimer > 0) {
     s.orderTimer -= dt;
-    if (s.orderTimer <= 0) {
+    if (s.orderTimer <= 0 && s.tacticalOrder !== 'eliminate') {
       s.tacticalOrder = null;
       s.orderTarget = null;
+      s.targetEnemyKey = null;
     }
   }
 
@@ -1175,102 +1438,332 @@ export function updateSoldierAI(
   const isProne = s.stance === 'prone' || s.proneTimer > 0;
   s.isCrouching = s.stance === 'crouch';
 
-  _aiEye.set(
-    s.position.x,
-    s.position.y + (isProne ? 0.4 : s.stance === 'crouch' ? 0.98 : 1.5),
-    s.position.z
-  );
+  // Slightly elevated eye when crouching behind cover and ready to peek-fire cleanly over sandbags
+  const peekClearance =
+    !isProne && s.assignedCoverIdx >= 0 && s.burstPauseTimer <= 0 ? 1.12 : isProne ? 0.44 : s.stance === 'crouch' ? 0.98 : 1.5;
+  _aiEye.set(s.position.x, s.position.y + peekClearance, s.position.z);
 
-  // Find nearest visible enemy (either AI or Player)
-  let bestEnemyPos: THREE.Vector3 | null = null;
-  let bestDistSq = 72 * 72;
-
-  if (playerAlive && s.faction !== playerFaction) {
-    const dSq = s.position.distanceToSquared(playerPos);
-    if (dSq < bestDistSq) {
-      _enemyEye.set(playerPos.x, playerPos.y + 1.45, playerPos.z);
-      if (
-        !isSegmentBlockedBySmoke(_aiEye, _enemyEye, activeSmokes) &&
-        hasLineOfSight(_aiEye, _enemyEye, boxes, cylinders)
-      ) {
-        bestDistSq = dSq;
-        bestEnemyPos = _enemyEye.clone();
-      }
-    }
-  }
-
-  for (let i = 0; i < allSoldiers.length; i++) {
-    const other = allSoldiers[i];
-    if (!other.alive || other.faction === s.faction) continue;
-    const dSq = s.position.distanceToSquared(other.position);
-    if (dSq < bestDistSq) {
-      _enemyEye.set(other.position.x, other.position.y + 1.4, other.position.z);
-      if (
-        !isSegmentBlockedBySmoke(_aiEye, _enemyEye, activeSmokes) &&
-        hasLineOfSight(_aiEye, _enemyEye, boxes, cylinders)
-      ) {
-        bestDistSq = dSq;
-        bestEnemyPos = _enemyEye.clone();
-      }
-    }
-  }
-
-  // Periodic tactical decision
-  s.decisionTimer -= dt;
-  if (s.decisionTimer <= 0) {
-    s.decisionTimer = 1.6 + Math.random() * 1.4;
-
-    if (!bestEnemyPos) {
-      // Pick an unowned or contested sector to push
-      const candidates = sectors
-        .map((sec, idx) => ({ sec, idx }))
-        .filter(({ sec }) => sec.owner !== s.faction);
-      const chosen =
-        candidates.length > 0
-          ? candidates[Math.floor(Math.random() * candidates.length)].idx
-          : 1;
-      if (chosen !== s.targetSectorIdx || s.waypointIdx >= s.routeWaypoints.length) {
-        s.targetSectorIdx = chosen;
-        const dest = sectors[chosen].position.clone();
-        dest.x += (Math.random() - 0.5) * 11;
-        dest.z += (Math.random() - 0.5) * 11;
-        s.routeWaypoints = pickRouteToTarget(s.position, dest);
-        s.waypointIdx = 0;
-      }
-      s.stance = 'stand';
-      s.isCrouching = false;
-      s.aiState = 'advance';
+  // If executing Tom Clancy single-subordinate ELIMINATE order, verify whether locked target is still alive
+  let lockedTargetAlive = false;
+  let lockedTargetHasLos = false;
+  if (s.tacticalOrder === 'eliminate' && s.targetEnemyKey) {
+    lockedTargetAlive = resolveEliminateTarget(
+      s.targetEnemyKey,
+      allSoldiers,
+      playerPos,
+      playerAlive,
+      playerFaction,
+      s.faction,
+      remoteTargets,
+      _elimTargetPos
+    );
+    if (!lockedTargetAlive) {
+      // Target is dead! Mission accomplished — exit eliminate order immediately
+      s.tacticalOrder = null;
+      s.targetEnemyKey = null;
+      s.orderTarget = null;
+      s.orderTimer = 0;
     } else {
-      // In combat: separate Debout, Accroupi, and Allongé for cover!
-      s.aiState = 'combat';
-      const eDistSq = bestEnemyPos.distanceToSquared(s.position);
-      const roll = Math.random();
-      if (s.hp < 52 || (isSniperWeapon(s.weaponId) && eDistSq > 26 * 26 && roll < 0.65)) {
-        s.stance = roll < 0.65 ? 'prone' : 'crouch';
-        if (s.stance === 'prone') s.proneTimer = Math.max(s.proneTimer, 2.2);
-      } else if (eDistSq > 16 * 16 && roll < 0.22) {
-        s.stance = 'prone';
-        s.proneTimer = Math.max(s.proneTimer, 1.8);
-      } else if (roll < 0.58) {
-        s.stance = 'crouch';
-      } else {
-        s.stance = 'stand';
-      }
-      s.isCrouching = s.stance === 'crouch';
+      // Keep order alive until target dies
+      s.orderTimer = Math.max(s.orderTimer, 2.5);
+      lockedTargetHasLos = hasLineOfSight(_aiEye, _elimTargetPos, boxes, cylinders);
+    }
+  }
 
-      if (s.hp < 55) {
-        let nearestCover: THREE.Vector3 | null = null;
-        let cDist = 18 * 18;
-        for (const cp of coverPoints) {
-          const d = s.position.distanceToSquared(cp);
-          if (d < cDist) {
-            cDist = d;
-            nearestCover = cp;
+  if (s.droneMarkedTimer > 0) {
+    s.droneMarkedTimer = Math.max(0, s.droneMarkedTimer - dt);
+  }
+  s.losScanTimer -= dt;
+
+  // Find nearest visible enemy using staggered LOS scan (~6 Hz full scan + cached target tracking every frame)
+  // Drone-marked enemies are spotted through bushes, reeds & smoke up to 108m by player's allies!
+  let hasBestEnemy = false;
+  let bestEnemyIsMarked = false;
+  let bestDistSq = 82 * 82;
+
+  if (s.losScanTimer <= 0) {
+    s.losScanTimer = 0.16 + (s.id % 4) * 0.015;
+    s.cachedEnemyKey = null;
+    let bestScoreDistSq = 1e9;
+
+    if (playerAlive && s.faction !== playerFaction) {
+      const dSq = s.position.distanceToSquared(playerPos);
+      if (dSq < 82 * 82) {
+        _enemyEye.set(playerPos.x, playerPos.y + 1.4, playerPos.z);
+        if (
+          !isSegmentBlockedBySmoke(_aiEye, _enemyEye, activeSmokes) &&
+          hasLineOfSight(_aiEye, _enemyEye, boxes, cylinders)
+        ) {
+          bestDistSq = dSq;
+          bestScoreDistSq = dSq;
+          _aiBestEnemy.copy(_enemyEye);
+          hasBestEnemy = true;
+          s.cachedEnemyKey = 'player';
+        }
+      }
+    }
+
+    for (let i = 0; i < allSoldiers.length; i++) {
+      const other = allSoldiers[i];
+      if (!other.alive || other.faction === s.faction) continue;
+      const isMarked = other.droneMarkedTimer > 0 && s.faction === playerFaction;
+      const maxRangeSq = isMarked ? 108 * 108 : 82 * 82;
+      const dSq = s.position.distanceToSquared(other.position);
+      if (dSq >= maxRangeSq) continue;
+      // Marked enemies get a strong detection score priority for subordinates
+      const effectiveScore = isMarked ? dSq * 0.42 : dSq;
+      if (effectiveScore >= bestScoreDistSq) continue;
+
+      _enemyEye.set(other.position.x, other.position.y + (other.stance === 'prone' ? 0.38 : 1.32), other.position.z);
+      if (
+        (isMarked || !isSegmentBlockedBySmoke(_aiEye, _enemyEye, activeSmokes)) &&
+        hasLineOfSight(_aiEye, _enemyEye, boxes, cylinders)
+      ) {
+        bestDistSq = dSq;
+        bestScoreDistSq = effectiveScore;
+        bestEnemyIsMarked = isMarked;
+        _aiBestEnemy.copy(_enemyEye);
+        hasBestEnemy = true;
+        s.cachedEnemyKey = `ai:${other.id}`;
+      }
+    }
+
+    for (let i = 0; i < remoteTargets.length; i++) {
+      const rp = remoteTargets[i];
+      if (!rp.alive || rp.faction === s.faction) continue;
+      const dSq = s.position.distanceToSquared(rp.position);
+      if (dSq >= 82 * 82 || dSq >= bestScoreDistSq) continue;
+      const aimY = rp.stance === 'prone' ? 0.36 : rp.stance === 'crouch' ? 0.88 : 1.32;
+      _enemyEye.set(rp.position.x, rp.position.y + aimY, rp.position.z);
+      if (
+        !isSegmentBlockedBySmoke(_aiEye, _enemyEye, activeSmokes) &&
+        hasLineOfSight(_aiEye, _enemyEye, boxes, cylinders)
+      ) {
+        bestDistSq = dSq;
+        bestScoreDistSq = dSq;
+        _aiBestEnemy.copy(_enemyEye);
+        hasBestEnemy = true;
+        s.cachedEnemyKey = rp.key;
+      }
+    }
+  } else if (s.cachedEnemyKey) {
+    if (
+      resolveEliminateTarget(
+        s.cachedEnemyKey,
+        allSoldiers,
+        playerPos,
+        playerAlive,
+        playerFaction,
+        s.faction,
+        remoteTargets,
+        _enemyEye
+      )
+    ) {
+      const dSq = s.position.distanceToSquared(_enemyEye);
+      let isMarked = false;
+      if (s.cachedEnemyKey.startsWith('ai:') && s.faction === playerFaction) {
+        const cid = Number(s.cachedEnemyKey.slice(3));
+        for (let i = 0; i < allSoldiers.length; i++) {
+          if (allSoldiers[i].id === cid) {
+            isMarked = allSoldiers[i].droneMarkedTimer > 0;
+            break;
           }
         }
-        if (nearestCover) {
-          s.coverPos = nearestCover;
+      }
+      const maxRangeSq = isMarked ? 108 * 108 : 82 * 82;
+      if (dSq < maxRangeSq) {
+        bestDistSq = dSq;
+        bestEnemyIsMarked = isMarked;
+        _aiBestEnemy.copy(_enemyEye);
+        hasBestEnemy = true;
+      } else {
+        s.cachedEnemyKey = null;
+      }
+    } else {
+      s.cachedEnemyKey = null;
+    }
+  }
+
+  // Override aim target cleanly for ELIMINATE order
+  if (lockedTargetAlive && lockedTargetHasLos) {
+    _aiBestEnemy.copy(_elimTargetPos);
+    bestDistSq = s.position.distanceToSquared(_elimTargetPos);
+    hasBestEnemy = true;
+  }
+
+  const bestEnemyPos: THREE.Vector3 | null = hasBestEnemy ? _aiBestEnemy : null;
+  void bestEnemyIsMarked;
+
+  // Draw flamethrower ONLY when close to an enemy (<= 16.5m); stow back to primary rifle when far (> 21m)
+  if (s.flameBackupId && s.flameGunGroup) {
+    if (bestEnemyPos && bestDistSq <= 16.5 * 16.5) {
+      if (s.weaponId !== s.flameBackupId) {
+        s.weaponId = s.flameBackupId;
+        s.primaryGunGroup.visible = false;
+        s.flameGunGroup.visible = true;
+        s.burstRemaining = 0;
+        s.fireCooldown = Math.min(s.fireCooldown, 0.14);
+      }
+    } else if (!bestEnemyPos || bestDistSq > 21.0 * 21.0) {
+      if (s.weaponId !== s.primaryWeaponId) {
+        s.weaponId = s.primaryWeaponId;
+        s.primaryGunGroup.visible = true;
+        s.flameGunGroup.visible = false;
+        s.burstRemaining = 0;
+      }
+    }
+  }
+
+  // Immediate Under-Fire Defensive Reaction: snap to sandbag cover or dive when shot in open ground
+  if (s.underFireTimer > 3.9 && s.tacticalOrder !== 'eliminate' && s.tacticalOrder !== 'assault') {
+    const coverDistSq = s.coverPos ? s.position.distanceToSquared(s.coverPos) : 9999;
+    if (coverDistSq > 3.0 * 3.0) {
+      const threat =
+        bestEnemyPos ||
+        s.orderTarget ||
+        _aiThreat.set(0, 0, s.faction === 'army' ? -45 : 45);
+      const emergencyCover = findBestCoverNode(s, allSoldiers, coverNodes, threat, s.position, 22);
+      if (emergencyCover) {
+        s.assignedCoverIdx = emergencyCover.idx;
+        if (!s.coverPos) s.coverPos = new THREE.Vector3();
+        s.coverPos.set(emergencyCover.node.x, emergencyCover.node.y, emergencyCover.node.z);
+        s.coverStance = emergencyCover.node.recommendedStance;
+        s.aiState = 'cover';
+      } else if (s.hp < 62 && s.diveCooldown <= 0 && bestEnemyPos) {
+        triggerSoldierDive(s, bestEnemyPos);
+      }
+    }
+  }
+
+  // Periodic Smarter Tactical & Defensive Decision
+  s.decisionTimer -= dt;
+  if (s.decisionTimer <= 0) {
+    s.decisionTimer = 1.2 + Math.random() * 1.1;
+
+    if (s.tacticalOrder === 'cover') {
+      const anchor = s.orderTarget || s.position;
+      const threat =
+        bestEnemyPos ||
+        _aiThreat.set(anchor.x, anchor.y, anchor.z + (s.faction === 'army' ? -35 : 35));
+      const found = findBestCoverNode(s, allSoldiers, coverNodes, threat, anchor, 32);
+      if (found) {
+        s.assignedCoverIdx = found.idx;
+        if (!s.coverPos) s.coverPos = new THREE.Vector3();
+        s.coverPos.set(found.node.x, found.node.y, found.node.z);
+        s.coverStance = found.node.recommendedStance;
+      }
+      s.aiState = 'cover';
+    } else if (!bestEnemyPos && s.underFireTimer <= 0 && !s.tacticalOrder) {
+      // Pick an unowned/contested sector, or defend an owned frontline sector behind sandbags!
+      const contestedOrEnemy = sectors
+        .map((sec, idx) => ({ sec, idx }))
+        .filter(({ sec }) => sec.active && sec.owner !== s.faction);
+      const friendlySectors = sectors
+        .map((sec, idx) => ({ sec, idx }))
+        .filter(({ sec }) => sec.active && sec.owner === s.faction);
+
+      const defendFriendly =
+        friendlySectors.length > 0 &&
+        (s.tacticalRole === 'defender' || contestedOrEnemy.length === 0 || Math.random() < 0.34);
+
+      if (defendFriendly) {
+        const chosenSec = friendlySectors[s.id % friendlySectors.length];
+        s.targetSectorIdx = chosenSec.idx;
+        const secPos = sectors[chosenSec.idx].position;
+        _aiThreat.set(
+          secPos.x,
+          secPos.y,
+          secPos.z + (s.faction === 'army' ? -42 : 42)
+        );
+        const defCover = findBestCoverNode(s, allSoldiers, coverNodes, _aiThreat, secPos, 30);
+        if (defCover) {
+          s.assignedCoverIdx = defCover.idx;
+          if (!s.coverPos) s.coverPos = new THREE.Vector3();
+          s.coverPos.set(defCover.node.x, defCover.node.y, defCover.node.z);
+          s.coverStance = defCover.node.recommendedStance;
+          s.aiState = 'defend';
+        } else {
+          s.assignedCoverIdx = -1;
+          s.coverPos = null;
+          s.aiState = 'advance';
+        }
+      } else {
+        const activeList = contestedOrEnemy.length > 0 ? contestedOrEnemy : sectors.map((sec, idx) => ({ sec, idx })).filter(({ sec }) => sec.active);
+        const chosen = activeList.length > 0 ? activeList[Math.floor(Math.random() * activeList.length)].idx : 0;
+        if (chosen !== s.targetSectorIdx || s.waypointIdx >= s.routeWaypoints.length) {
+          s.targetSectorIdx = chosen;
+          _aiThreat.copy(sectors[chosen].position);
+          _aiThreat.x += (Math.random() - 0.5) * 10;
+          _aiThreat.z += (Math.random() - 0.5) * 10;
+          s.routeWaypoints = pickRouteToTarget(s.position, _aiThreat);
+          s.waypointIdx = 0;
+        }
+        s.assignedCoverIdx = -1;
+        s.coverPos = null;
+        s.stance = 'stand';
+        s.isCrouching = false;
+        s.aiState = 'advance';
+      }
+    } else if (bestEnemyPos && !s.tacticalOrder) {
+      // Cover-First Combat Intelligence: soldiers always prefer sandbag cover over standing in open terrain!
+      const eDistSq = bestEnemyPos.distanceToSquared(s.position);
+      const canFlank =
+        s.tacticalRole === 'flanker' &&
+        s.hp >= 65 &&
+        eDistSq > 14 * 14 &&
+        eDistSq < 56 * 56 &&
+        !isSniperWeapon(s.weaponId);
+
+      // Check if an ally is already suppressing nearby so flankers can peel off cleanly
+      let allyNearby = false;
+      if (canFlank) {
+        for (let i = 0; i < allSoldiers.length; i++) {
+          const a = allSoldiers[i];
+          if (a !== s && a.alive && a.faction === s.faction && a.position.distanceToSquared(s.position) < 22 * 22) {
+            allyNearby = true;
+            break;
+          }
+        }
+      }
+
+      if (canFlank && allyNearby && Math.random() < 0.35) {
+        _aiFlankDir.subVectors(bestEnemyPos, s.position);
+        _aiFlankDir.y = 0;
+        _aiFlankDir.normalize();
+        _aiFlankAnchor
+          .copy(s.position)
+          .addScaledVector(_aiFlankDir, 10);
+        _aiFlankAnchor.x += -_aiFlankDir.z * 14 * s.flankSign;
+        _aiFlankAnchor.z += _aiFlankDir.x * 14 * s.flankSign;
+        const flankCover = findBestCoverNode(s, allSoldiers, coverNodes, bestEnemyPos, _aiFlankAnchor, 22);
+        if (flankCover) {
+          s.assignedCoverIdx = flankCover.idx;
+          if (!s.coverPos) s.coverPos = new THREE.Vector3();
+          s.coverPos.set(flankCover.node.x, flankCover.node.y, flankCover.node.z);
+          s.coverStance = flankCover.node.recommendedStance;
+          s.aiState = 'flank';
+        } else {
           s.aiState = 'cover';
+        }
+      } else {
+        const bestCover = findBestCoverNode(s, allSoldiers, coverNodes, bestEnemyPos, s.position, 26);
+        if (bestCover) {
+          s.assignedCoverIdx = bestCover.idx;
+          if (!s.coverPos) s.coverPos = new THREE.Vector3();
+          s.coverPos.set(bestCover.node.x, bestCover.node.y, bestCover.node.z);
+          s.coverStance = bestCover.node.recommendedStance;
+          s.aiState = 'cover';
+        } else {
+          s.assignedCoverIdx = -1;
+          s.coverPos = null;
+          s.aiState = 'combat';
+          if (s.hp < 52 || (isSniperWeapon(s.weaponId) && eDistSq > 26 * 26)) {
+            s.stance = 'prone';
+            s.proneTimer = Math.max(s.proneTimer, 2.2);
+          } else {
+            s.stance = 'crouch';
+          }
+          s.isCrouching = s.stance === 'crouch';
         }
       }
     }
@@ -1304,13 +1797,15 @@ export function updateSoldierAI(
   }
   s.hadEnemyLastTick = hasEnemy;
 
-  // Senior AI Commander autonomous orders to lower-ranked squadmates
+  // Senior AI Commander autonomous orders to lower-ranked squadmates (Tom Clancy tactical AI)
   if (s.rankLevel >= 4 && s.commandCooldown <= 0 && !s.tacticalOrder) {
     let commandedAny = false;
     const autoOrder: TacticalOrderId = bestEnemyPos
-      ? Math.random() < 0.55
-        ? 'suppress'
+      ? s.underFireTimer > 1.2 || Math.random() < 0.52
+        ? 'cover'
         : 'assault'
+      : Math.random() < 0.4
+      ? 'move'
       : 'assault';
     const baseDest = bestEnemyPos
       ? bestEnemyPos.clone()
@@ -1323,7 +1818,7 @@ export function updateSoldierAI(
         sub.faction === s.faction &&
         sub.rankLevel < s.rankLevel &&
         !sub.tacticalOrder &&
-        sub.position.distanceToSquared(s.position) < 22 * 22
+        sub.position.distanceToSquared(s.position) < 24 * 24
       ) {
         const spreadAngle = (sub.id % 6) * (Math.PI / 3);
         const subDest = baseDest.clone();
@@ -1331,7 +1826,7 @@ export function updateSoldierAI(
         subDest.z += Math.sin(spreadAngle) * 4.5;
         sub.tacticalOrder = autoOrder;
         sub.orderTarget = subDest;
-        sub.orderTimer = 8.5;
+        sub.orderTimer = 9.0;
         sub.routeWaypoints = pickRouteToTarget(sub.position, subDest);
         sub.waypointIdx = 0;
         commandedAny = true;
@@ -1345,11 +1840,48 @@ export function updateSoldierAI(
     }
   }
 
-  // Movement, Tom Clancy Orders & Rotation
+  // Movement, Tom Clancy Orders & Cover-First Posture
   let moveSpeed = 0;
   let desiredYaw = s.yaw;
 
-  if (s.tacticalOrder === 'follow' && playerAlive && s.faction === playerFaction && !isProne) {
+  if (s.tacticalOrder === 'eliminate' && lockedTargetAlive) {
+    // Dedicated Single-Subordinate Target Elimination until target dies!
+    _aiAim.subVectors(_elimTargetPos, _aiEye);
+    desiredYaw = Math.atan2(_aiAim.x, _aiAim.z);
+    if (lockedTargetHasLos) {
+      // Snap to nearby sandbag cover if one is right next to soldier, otherwise lock in crouch firing stance
+      if (s.coverPos && s.position.distanceToSquared(s.coverPos) > 1.4 * 1.4 && s.position.distanceToSquared(s.coverPos) < 5.0 * 5.0) {
+        _aiToTarget.subVectors(s.coverPos, s.position);
+        _aiToTarget.y = 0;
+        _aiToTarget.normalize();
+        moveSpeed = 4.6;
+        s.stance = 'crouch';
+        s.isCrouching = true;
+      } else {
+        moveSpeed = 0;
+        s.stance = isSniperWeapon(s.weaponId) && s.position.distanceToSquared(_elimTargetPos) > 26 * 26 ? 'prone' : 'crouch';
+        s.isCrouching = s.stance === 'crouch';
+      }
+    } else {
+      // Maneuver laterally / forward to obtain clear LOS onto marked target
+      _aiToTarget.subVectors(_elimTargetPos, s.position);
+      _aiToTarget.y = 0;
+      const tDist = _aiToTarget.length();
+      if (tDist > 1.5) {
+        _aiToTarget.divideScalar(tDist);
+        const side = s.flankSign * 0.48;
+        const rx = -_aiToTarget.z;
+        const rz = _aiToTarget.x;
+        _aiToTarget.x += rx * side;
+        _aiToTarget.z += rz * side;
+        _aiToTarget.normalize();
+        desiredYaw = Math.atan2(_aiToTarget.x, _aiToTarget.z);
+        moveSpeed = 5.1;
+        s.stance = 'stand';
+        s.isCrouching = false;
+      }
+    }
+  } else if (s.tacticalOrder === 'follow' && playerAlive && s.faction === playerFaction && !isProne) {
     // Follow / Escort player in spaced tactical formation
     const slotAngle = ((s.id % 5) - 2) * 0.65;
     const formX = playerPos.x + Math.sin(slotAngle) * 4.6;
@@ -1357,10 +1889,10 @@ export function updateSoldierAI(
     _aiToTarget.set(formX - s.position.x, 0, formZ - s.position.z);
     const fDist = _aiToTarget.length();
     const dPlayerSq = s.position.distanceToSquared(playerPos);
-    if (fDist > 1.6 && dPlayerSq > 3.0 * 3.0) {
+    if (fDist > 1.8 && dPlayerSq > 3.2 * 3.2) {
       _aiToTarget.divideScalar(fDist);
       desiredYaw = Math.atan2(_aiToTarget.x, _aiToTarget.z);
-      moveSpeed = fDist > 7 ? 5.1 : 4.1;
+      moveSpeed = fDist > 7 ? 5.2 : 4.2;
       s.stance = 'stand';
       s.isCrouching = false;
     } else if (bestEnemyPos) {
@@ -1369,81 +1901,97 @@ export function updateSoldierAI(
       s.stance = 'crouch';
       s.isCrouching = true;
     } else {
+      s.stance = 'crouch';
+      s.isCrouching = true;
+    }
+  } else if (s.tacticalOrder === 'cover' && !isProne) {
+    // À Couvert: rush into assigned sandbag cover facing threat and defend
+    if (!s.coverPos) {
+      const anchor = s.orderTarget || s.position;
+      const threat = bestEnemyPos || _aiThreat.set(anchor.x, anchor.y, anchor.z + (s.faction === 'army' ? -35 : 35));
+      const found = findBestCoverNode(s, allSoldiers, coverNodes, threat, anchor, 32);
+      if (found) {
+        s.assignedCoverIdx = found.idx;
+        s.coverPos = new THREE.Vector3(found.node.x, found.node.y, found.node.z);
+        s.coverStance = found.node.recommendedStance;
+      }
+    }
+    const dest = s.coverPos || s.orderTarget;
+    if (dest && s.position.distanceToSquared(dest) > 1.45 * 1.45) {
+      _aiToTarget.subVectors(dest, s.position);
+      _aiToTarget.y = 0;
+      _aiToTarget.normalize();
+      desiredYaw = Math.atan2(_aiToTarget.x, _aiToTarget.z);
+      moveSpeed = 5.25;
       s.stance = 'stand';
       s.isCrouching = false;
-    }
-  } else if (s.tacticalOrder === 'hold' && !isProne) {
-    // Hold position at target point (or current cover) and defend
-    if (s.orderTarget && s.position.distanceToSquared(s.orderTarget) > 4.2 * 4.2) {
-      if (s.waypointIdx < s.routeWaypoints.length) {
-        const wp = s.routeWaypoints[s.waypointIdx];
-        _aiToTarget.subVectors(wp, s.position);
-        _aiToTarget.y = 0;
-        const wpDist = _aiToTarget.length();
-        if (wpDist < 2.0) s.waypointIdx++;
-        else {
-          _aiToTarget.divideScalar(wpDist);
-          desiredYaw = Math.atan2(_aiToTarget.x, _aiToTarget.z);
-          moveSpeed = 4.6;
-          s.stance = 'stand';
-          s.isCrouching = false;
-        }
-      }
     } else {
-      if (s.weaponId === 'sniper' || s.hp < 55) {
+      moveSpeed = 0;
+      if (s.hp < 45 || s.coverStance === 'prone') {
         s.stance = 'prone';
         s.isCrouching = false;
       } else {
         s.stance = 'crouch';
         s.isCrouching = true;
       }
-      moveSpeed = 0;
       if (bestEnemyPos) {
         _aiAim.subVectors(bestEnemyPos, _aiEye);
         desiredYaw = Math.atan2(_aiAim.x, _aiAim.z);
+      } else if (s.assignedCoverIdx >= 0 && coverNodes[s.assignedCoverIdx]) {
+        const cn = coverNodes[s.assignedCoverIdx];
+        desiredYaw = Math.atan2(cn.faceX, cn.faceZ);
       }
     }
-  } else if (s.tacticalOrder === 'suppress' && s.orderTarget) {
-    // Suppressive fire onto aimed point or visible enemy
-    if (s.stance === 'stand') s.stance = 'crouch';
-    s.isCrouching = s.stance === 'crouch';
-    const suppressAim = bestEnemyPos || s.orderTarget;
-    _aiAim.subVectors(suppressAim, _aiEye);
-    desiredYaw = Math.atan2(_aiAim.x, _aiAim.z);
-
-    if (s.burstPauseTimer <= 0 && s.fireCooldown <= 0) {
-      if (s.burstRemaining <= 0) {
-        s.burstRemaining =
-          isSniperWeapon(s.weaponId) || isRocketWeapon(s.weaponId)
-            ? 1
-            : isFlameWeapon(s.weaponId)
-            ? 12
-            : 5;
+  } else if (s.tacticalOrder === 'move' && s.orderTarget && !isProne) {
+    // Déplacement tactique: advance to target, then immediately claim nearest sandbag cover!
+    const distToOrderSq = s.position.distanceToSquared(s.orderTarget);
+    if (distToOrderSq > 3.6 * 3.6) {
+      if (s.waypointIdx < s.routeWaypoints.length) {
+        const wp = s.routeWaypoints[s.waypointIdx];
+        _aiToTarget.subVectors(wp, s.position);
+        _aiToTarget.y = 0;
+        const wpDist = _aiToTarget.length();
+        if (wpDist < 2.1) {
+          s.waypointIdx++;
+        } else {
+          _aiToTarget.divideScalar(wpDist);
+          desiredYaw = Math.atan2(_aiToTarget.x, _aiToTarget.z);
+          moveSpeed = bestEnemyPos && bestDistSq < 15 * 15 ? 3.5 : 4.95;
+          s.stance = 'stand';
+          s.isCrouching = false;
+        }
       }
-      const muzzleWorld = new THREE.Vector3(0, 0.02, 0.72);
-      s.armsGroup.localToWorld(muzzleWorld);
-      const aimDir = new THREE.Vector3().subVectors(suppressAim, muzzleWorld).normalize();
-      const spread = 0.065;
-      aimDir.x += (Math.random() - 0.5) * spread;
-      aimDir.y += (Math.random() - 0.5) * spread * 0.65;
-      aimDir.z += (Math.random() - 0.5) * spread;
-      aimDir.normalize();
-      onAiFire(s, muzzleWorld, aimDir);
-      s.muzzleFlash.visible = true;
-      s.muzzleFlashTimer = 0.05;
-      s.burstRemaining--;
-      s.fireCooldown = isRocketWeapon(s.weaponId)
-        ? 4.2
-        : isSniperWeapon(s.weaponId)
-        ? 0.95
-        : isFlameWeapon(s.weaponId)
-        ? 0.075
-        : 0.11;
-      if (s.burstRemaining <= 0) s.burstPauseTimer = 0.45;
+    } else {
+      if (!s.coverPos) {
+        const threat = bestEnemyPos || _aiThreat.set(s.orderTarget.x, s.orderTarget.y, s.orderTarget.z + (s.faction === 'army' ? -30 : 30));
+        const arriveCover = findBestCoverNode(s, allSoldiers, coverNodes, threat, s.orderTarget, 14);
+        if (arriveCover) {
+          s.assignedCoverIdx = arriveCover.idx;
+          s.coverPos = new THREE.Vector3(arriveCover.node.x, arriveCover.node.y, arriveCover.node.z);
+          s.coverStance = arriveCover.node.recommendedStance;
+        }
+      }
+      if (s.coverPos && s.position.distanceToSquared(s.coverPos) > 1.4 * 1.4) {
+        _aiToTarget.subVectors(s.coverPos, s.position);
+        _aiToTarget.y = 0;
+        _aiToTarget.normalize();
+        desiredYaw = Math.atan2(_aiToTarget.x, _aiToTarget.z);
+        moveSpeed = 4.6;
+        s.stance = 'crouch';
+        s.isCrouching = true;
+      } else {
+        moveSpeed = 0;
+        s.stance = 'crouch';
+        s.isCrouching = true;
+        if (bestEnemyPos) {
+          _aiAim.subVectors(bestEnemyPos, _aiEye);
+          desiredYaw = Math.atan2(_aiAim.x, _aiAim.z);
+        }
+      }
     }
   } else if (s.tacticalOrder === 'assault' && s.orderTarget && !isProne && s.waypointIdx < s.routeWaypoints.length) {
-    // Aggressive assault push toward commanded point (engage if close to enemy)
-    if (bestEnemyPos && bestDistSq < 13 * 13) {
+    // Aggressive bounding assault toward commanded sector/position
+    if (bestEnemyPos && bestDistSq < 12 * 12) {
       _aiAim.subVectors(bestEnemyPos, _aiEye);
       desiredYaw = Math.atan2(_aiAim.x, _aiAim.z);
       moveSpeed = 0;
@@ -1459,9 +2007,38 @@ export function updateSoldierAI(
       } else {
         _aiToTarget.divideScalar(wpDist);
         desiredYaw = Math.atan2(_aiToTarget.x, _aiToTarget.z);
-        moveSpeed = 5.2;
+        moveSpeed = 5.35;
         s.stance = 'stand';
         s.isCrouching = false;
+      }
+    }
+  } else if (s.coverPos && (s.aiState === 'cover' || s.aiState === 'defend' || s.aiState === 'flank') && !isProne) {
+    // Autonomous Cover-First & Sector Defense Logic
+    const dCoverSq = s.position.distanceToSquared(s.coverPos);
+    if (dCoverSq > 1.45 * 1.45) {
+      _aiToTarget.subVectors(s.coverPos, s.position);
+      _aiToTarget.y = 0;
+      _aiToTarget.normalize();
+      desiredYaw = Math.atan2(_aiToTarget.x, _aiToTarget.z);
+      moveSpeed = s.underFireTimer > 0 ? 5.25 : 4.65;
+      s.stance = 'stand';
+      s.isCrouching = false;
+    } else {
+      // Positioned cleanly behind sandbag cover — stay anchored in crouch/prone!
+      moveSpeed = 0;
+      if (s.hp < 46 || s.coverStance === 'prone') {
+        s.stance = 'prone';
+        s.isCrouching = false;
+      } else {
+        s.stance = 'crouch';
+        s.isCrouching = true;
+      }
+      if (bestEnemyPos) {
+        _aiAim.subVectors(bestEnemyPos, _aiEye);
+        desiredYaw = Math.atan2(_aiAim.x, _aiAim.z);
+      } else if (s.assignedCoverIdx >= 0 && coverNodes[s.assignedCoverIdx]) {
+        const cn = coverNodes[s.assignedCoverIdx];
+        desiredYaw = Math.atan2(cn.faceX, cn.faceZ);
       }
     }
   } else if (bestEnemyPos) {
@@ -1470,20 +2047,13 @@ export function updateSoldierAI(
 
     const dist = Math.sqrt(bestDistSq);
     if (!isProne) {
-      if (s.aiState === 'cover' && s.coverPos && s.position.distanceToSquared(s.coverPos) > 2.2) {
-        _aiToTarget.subVectors(s.coverPos, s.position);
-        _aiToTarget.y = 0;
-        _aiToTarget.normalize();
-        moveSpeed = 4.2;
-      } else if (dist > 26 && !s.isCrouching) {
-        // Close distance slightly while engaging
+      if (dist > 30 && !s.isCrouching) {
         _aiToTarget.subVectors(bestEnemyPos, s.position);
         _aiToTarget.y = 0;
         _aiToTarget.normalize();
-        moveSpeed = 2.6;
-      } else if (dist < 10) {
-        // Strafe laterally in close quarters
-        const side = s.id % 2 === 0 ? 1 : -1;
+        moveSpeed = 2.8;
+      } else if (dist < 8.5) {
+        const side = s.flankSign;
         _aiToTarget.set(Math.cos(desiredYaw) * side, 0, -Math.sin(desiredYaw) * side);
         moveSpeed = 2.4;
       }
@@ -1498,51 +2068,78 @@ export function updateSoldierAI(
     } else {
       _aiToTarget.divideScalar(wpDist);
       desiredYaw = Math.atan2(_aiToTarget.x, _aiToTarget.z);
-      moveSpeed = 4.45;
+      moveSpeed = 4.55;
     }
   }
 
-  // Standard combat firing whenever an enemy is visible (even during follow/hold/assault!)
-  if (bestEnemyPos && s.tacticalOrder !== 'suppress') {
+  // Standard & Order Combat Firing (Peek-fire cleanly from sandbags; relentless bursts during ELIMINATE)
+  if (bestEnemyPos) {
     const dist = Math.sqrt(bestDistSq);
-    if (s.tacticalOrder === 'assault' || s.tacticalOrder === 'follow' || s.tacticalOrder === 'hold') {
+    if (moveSpeed < 0.5) {
       _aiAim.subVectors(bestEnemyPos, _aiEye);
-      if (moveSpeed < 0.5) {
-        desiredYaw = Math.atan2(_aiAim.x, _aiAim.z);
-      }
+      desiredYaw = Math.atan2(_aiAim.x, _aiAim.z);
     }
+    const isElimOrder = s.tacticalOrder === 'eliminate' && lockedTargetAlive;
     const isRkt = isRocketWeapon(s.weaponId);
     const isFlm = isFlameWeapon(s.weaponId);
     const isSnp = isSniperWeapon(s.weaponId);
     const canFireWeapon =
       (!isRkt || dist > 11) && (!isFlm || dist < 19.5);
     if (canFireWeapon && s.burstPauseTimer <= 0 && s.fireCooldown <= 0) {
+      const wSpec = WEAPON_SPECS[s.weaponId];
+      const rpm = wSpec?.rpm ?? 650;
+      const isSuppressWeapon = !isFlm && rpm >= 880;
       if (s.burstRemaining <= 0) {
         s.burstRemaining =
-          isSnp || isRkt ? 1 : isFlm ? 10 : 2 + Math.floor(Math.random() * 4);
+          isSnp || isRkt
+            ? 1
+            : isFlm
+            ? 10
+            : isElimOrder
+            ? isSuppressWeapon
+              ? 8
+              : 6
+            : isSuppressWeapon
+            ? 5 + Math.floor(Math.random() * 4)
+            : 3 + Math.floor(Math.random() * 3);
       }
-      const muzzleWorld = new THREE.Vector3(0, 0.02, 0.72);
-      s.armsGroup.localToWorld(muzzleWorld);
-      const aimDir = new THREE.Vector3().subVectors(bestEnemyPos, muzzleWorld).normalize();
-      const spread = isSnp ? 0.026 : isRkt ? 0.038 : isFlm ? 0.075 : 0.055;
-      aimDir.x += (Math.random() - 0.5) * spread;
-      aimDir.y += (Math.random() - 0.5) * spread * 0.75 + (isRkt ? 0.035 : 0);
-      aimDir.z += (Math.random() - 0.5) * spread;
-      aimDir.normalize();
+      _aiMuzzle.set(0, 0.02, 0.72);
+      s.armsGroup.localToWorld(_aiMuzzle);
+      // Raise muzzle slightly above sandbag lip when crouched in cover so shots clear friendly sandbags cleanly
+      if (s.assignedCoverIdx >= 0 && !isProne) {
+        _aiMuzzle.y = Math.max(_aiMuzzle.y, s.position.y + 1.06);
+      }
+      _aiAimDir.subVectors(bestEnemyPos, _aiMuzzle).normalize();
+      const baseSpread = isSnp ? 0.018 : isRkt ? 0.036 : isFlm ? 0.072 : 0.048;
+      const spread = isElimOrder ? baseSpread * 0.62 : baseSpread;
+      _aiAimDir.x += (Math.random() - 0.5) * spread;
+      _aiAimDir.y += (Math.random() - 0.5) * spread * 0.68 + (isRkt ? 0.035 : 0);
+      _aiAimDir.z += (Math.random() - 0.5) * spread;
+      _aiAimDir.normalize();
 
-      onAiFire(s, muzzleWorld, aimDir);
+      onAiFire(s, _aiMuzzle, _aiAimDir);
       s.muzzleFlash.visible = true;
       s.muzzleFlashTimer = 0.05;
       s.burstRemaining--;
       s.fireCooldown = isRkt
-        ? 4.4 + Math.random() * 1.6
+        ? 4.2 + Math.random() * 1.4
         : isSnp
-        ? 1.15
+        ? Math.max(0.4, (60 / rpm) * 1.1)
         : isFlm
-        ? 0.08
-        : 0.13 + Math.random() * 0.06;
+        ? 0.072
+        : isSuppressWeapon
+        ? Math.max(0.058, (60 / rpm) * 1.05)
+        : Math.max(0.105, (60 / rpm) * 1.3) + Math.random() * 0.03;
       if (s.burstRemaining <= 0) {
-        s.burstPauseTimer = isFlm ? 0.45 : 0.65 + Math.random() * 0.9;
+        s.burstPauseTimer = isElimOrder
+          ? isFlm
+            ? 0.28
+            : 0.34
+          : isFlm
+          ? 0.42
+          : isSuppressWeapon
+          ? 0.45 + Math.random() * 0.5
+          : 0.62 + Math.random() * 0.78;
         if (onCallout && s.calloutCooldown <= 0 && Math.random() < 0.25) {
           onCallout(s, 'reload', false);
           s.calloutCooldown = 7.0;

@@ -229,6 +229,7 @@ export interface SegmentHitResult {
 }
 
 const _segDir = new THREE.Vector3();
+const _hitNormalTmp = new THREE.Vector3();
 
 export function intersectSegmentEnvironment(
   p0: THREE.Vector3,
@@ -237,28 +238,47 @@ export function intersectSegmentEnvironment(
   cylinders: ColliderCylinder[],
   ignoreIds?: Set<string>
 ): SegmentHitResult | null {
-  _segDir.subVectors(p1, p0);
-  const segLen = _segDir.length();
-  if (segLen < 1e-6) return null;
+  const dx = p1.x - p0.x;
+  const dy = p1.y - p0.y;
+  const dz = p1.z - p0.z;
+  const lenSq = dx * dx + dy * dy + dz * dz;
+  if (lenSq < 1e-12) return null;
+
+  const segMinX = Math.min(p0.x, p1.x);
+  const segMaxX = Math.max(p0.x, p1.x);
+  const segMinY = Math.min(p0.y, p1.y);
+  const segMaxY = Math.max(p0.y, p1.y);
+  const segMinZ = Math.min(p0.z, p1.z);
+  const segMaxZ = Math.max(p0.z, p1.z);
 
   let bestT = 1.01;
-  let bestHit: SegmentHitResult | null = null;
+  let hitFound = false;
+  let bestX = 0;
+  let bestY = 0;
+  let bestZ = 0;
+  let bestNx = 0;
+  let bestNy = 1;
+  let bestNz = 0;
+  let bestMaterial: SegmentHitResult['material'] = 'terrain';
+  let bestPenetrable = false;
 
   // 1. Check water surface crossing
   if ((p0.y > WATER_LEVEL && p1.y <= WATER_LEVEL) || (p0.y < WATER_LEVEL && p1.y >= WATER_LEVEL)) {
-    const tW = (WATER_LEVEL - p0.y) / (p1.y - p0.y);
+    const tW = (WATER_LEVEL - p0.y) / dy;
     if (tW >= 0 && tW <= 1) {
-      const wx = p0.x + _segDir.x * tW;
-      const wz = p0.z + _segDir.z * tW;
+      const wx = p0.x + dx * tW;
+      const wz = p0.z + dz * tW;
       if (groundHeightAt(wx, wz) < WATER_LEVEL - 0.04 && tW < bestT) {
         bestT = tW;
-        bestHit = {
-          t: tW,
-          point: new THREE.Vector3(wx, WATER_LEVEL, wz),
-          normal: new THREE.Vector3(0, 1, 0),
-          material: 'water',
-          penetrable: true,
-        };
+        hitFound = true;
+        bestX = wx;
+        bestY = WATER_LEVEL;
+        bestZ = wz;
+        bestNx = 0;
+        bestNy = 1;
+        bestNz = 0;
+        bestMaterial = 'water';
+        bestPenetrable = true;
       }
     }
   }
@@ -268,47 +288,54 @@ export function intersectSegmentEnvironment(
   for (let s = 1; s <= steps; s++) {
     const t = s / steps;
     if (t >= bestT) break;
-    const sx = p0.x + _segDir.x * t;
-    const sy = p0.y + _segDir.y * t;
-    const sz = p0.z + _segDir.z * t;
+    const sx = p0.x + dx * t;
+    const sy = p0.y + dy * t;
+    const sz = p0.z + dz * t;
     const gh = groundHeightAt(sx, sz);
     if (sy <= gh) {
-      // Refine binary search
       let lo = (s - 1) / steps;
       let hi = t;
       for (let k = 0; k < 4; k++) {
         const mid = (lo + hi) * 0.5;
-        const mx = p0.x + _segDir.x * mid;
-        const my = p0.y + _segDir.y * mid;
-        const mz = p0.z + _segDir.z * mid;
+        const mx = p0.x + dx * mid;
+        const my = p0.y + dy * mid;
+        const mz = p0.z + dz * mid;
         if (my <= groundHeightAt(mx, mz)) hi = mid;
         else lo = mid;
       }
-      const hitPt = new THREE.Vector3(
-        p0.x + _segDir.x * hi,
-        groundHeightAt(p0.x + _segDir.x * hi, p0.z + _segDir.z * hi),
-        p0.z + _segDir.z * hi
-      );
       bestT = hi;
-      bestHit = {
-        t: hi,
-        point: hitPt,
-        normal: groundNormalAt(hitPt.x, hitPt.z, new THREE.Vector3()),
-        material: 'terrain',
-        penetrable: false,
-      };
+      hitFound = true;
+      bestX = p0.x + dx * hi;
+      bestZ = p0.z + dz * hi;
+      bestY = groundHeightAt(bestX, bestZ);
+      groundNormalAt(bestX, bestZ, _hitNormalTmp);
+      bestNx = _hitNormalTmp.x;
+      bestNy = _hitNormalTmp.y;
+      bestNz = _hitNormalTmp.z;
+      bestMaterial = 'terrain';
+      bestPenetrable = false;
       break;
     }
   }
 
-  // 3. AABB ray slab intersection
-  const invX = Math.abs(_segDir.x) > 1e-8 ? 1 / _segDir.x : 1e8;
-  const invY = Math.abs(_segDir.y) > 1e-8 ? 1 / _segDir.y : 1e8;
-  const invZ = Math.abs(_segDir.z) > 1e-8 ? 1 / _segDir.z : 1e8;
+  // 3. AABB ray slab intersection with broadphase rejection
+  const invX = Math.abs(dx) > 1e-8 ? 1 / dx : 1e8;
+  const invY = Math.abs(dy) > 1e-8 ? 1 / dy : 1e8;
+  const invZ = Math.abs(dz) > 1e-8 ? 1 / dz : 1e8;
 
   for (let i = 0; i < boxes.length; i++) {
     const b = boxes[i];
     if (ignoreIds && ignoreIds.has(b.id)) continue;
+    if (
+      b.maxX < segMinX ||
+      b.minX > segMaxX ||
+      b.maxY < segMinY ||
+      b.minY > segMaxY ||
+      b.maxZ < segMinZ ||
+      b.minZ > segMaxZ
+    ) {
+      continue;
+    }
 
     const tx1 = (b.minX - p0.x) * invX;
     const tx2 = (b.maxX - p0.x) * invX;
@@ -327,68 +354,252 @@ export function intersectSegmentEnvironment(
 
     if (tmax >= Math.max(0, tmin) && tmin >= 0 && tmin < bestT && tmin <= 1) {
       bestT = tmin;
-      const hitPt = p0.clone().addScaledVector(_segDir, tmin);
-      const n = new THREE.Vector3(0, 1, 0);
+      hitFound = true;
+      bestX = p0.x + dx * tmin;
+      bestY = p0.y + dy * tmin;
+      bestZ = p0.z + dz * tmin;
       const eps = 0.02;
-      if (Math.abs(hitPt.x - b.minX) < eps) n.set(-1, 0, 0);
-      else if (Math.abs(hitPt.x - b.maxX) < eps) n.set(1, 0, 0);
-      else if (Math.abs(hitPt.z - b.minZ) < eps) n.set(0, 0, -1);
-      else if (Math.abs(hitPt.z - b.maxZ) < eps) n.set(0, 0, 1);
-      else if (Math.abs(hitPt.y - b.minY) < eps) n.set(0, -1, 0);
-
-      bestHit = {
-        t: tmin,
-        point: hitPt,
-        normal: n,
-        material: b.material,
-        penetrable: Boolean(b.penetrable),
-      };
+      if (Math.abs(bestX - b.minX) < eps) {
+        bestNx = -1; bestNy = 0; bestNz = 0;
+      } else if (Math.abs(bestX - b.maxX) < eps) {
+        bestNx = 1; bestNy = 0; bestNz = 0;
+      } else if (Math.abs(bestZ - b.minZ) < eps) {
+        bestNx = 0; bestNy = 0; bestNz = -1;
+      } else if (Math.abs(bestZ - b.maxZ) < eps) {
+        bestNx = 0; bestNy = 0; bestNz = 1;
+      } else if (Math.abs(bestY - b.minY) < eps) {
+        bestNx = 0; bestNy = -1; bestNz = 0;
+      } else {
+        bestNx = 0; bestNy = 1; bestNz = 0;
+      }
+      bestMaterial = b.material;
+      bestPenetrable = Boolean(b.penetrable);
     }
   }
 
-  // 4. Cylinder ray intersection (XZ quadratic)
-  const dx = _segDir.x;
-  const dz = _segDir.z;
+  // 4. Cylinder ray intersection (XZ quadratic with AABB broadphase)
   const a = dx * dx + dz * dz;
   if (a > 1e-8) {
+    const inv2a = 0.5 / a;
     for (let i = 0; i < cylinders.length; i++) {
       const c = cylinders[i];
       if (ignoreIds && ignoreIds.has(c.id)) continue;
+      if (
+        c.x + c.radius < segMinX ||
+        c.x - c.radius > segMaxX ||
+        c.z + c.radius < segMinZ ||
+        c.z - c.radius > segMaxZ ||
+        c.maxY < segMinY ||
+        c.minY > segMaxY
+      ) {
+        continue;
+      }
       const fx = p0.x - c.x;
       const fz = p0.z - c.z;
       const b = 2 * (fx * dx + fz * dz);
       const cc = fx * fx + fz * fz - c.radius * c.radius;
       const disc = b * b - 4 * a * cc;
       if (disc < 0) continue;
-      const sqrtD = Math.sqrt(disc);
-      const t = (-b - sqrtD) / (2 * a);
+      const t = (-b - Math.sqrt(disc)) * inv2a;
       if (t >= 0 && t <= 1 && t < bestT) {
-        const hy = p0.y + _segDir.y * t;
+        const hy = p0.y + dy * t;
         if (hy >= c.minY && hy <= c.maxY) {
           bestT = t;
-          const hitPt = p0.clone().addScaledVector(_segDir, t);
-          const n = new THREE.Vector3(hitPt.x - c.x, 0, hitPt.z - c.z).normalize();
-          bestHit = {
-            t,
-            point: hitPt,
-            normal: n,
-            material: c.material,
-            penetrable: Boolean(c.penetrable),
-          };
+          hitFound = true;
+          bestX = p0.x + dx * t;
+          bestY = hy;
+          bestZ = p0.z + dz * t;
+          const nx = bestX - c.x;
+          const nz = bestZ - c.z;
+          const invLen = 1 / Math.max(1e-6, Math.hypot(nx, nz));
+          bestNx = nx * invLen;
+          bestNy = 0;
+          bestNz = nz * invLen;
+          bestMaterial = c.material;
+          bestPenetrable = Boolean(c.penetrable);
         }
       }
     }
   }
 
-  return bestHit;
+  if (!hitFound) return null;
+  _segDir.set(bestX, bestY, bestZ);
+  return {
+    t: bestT,
+    point: new THREE.Vector3(bestX, bestY, bestZ),
+    normal: new THREE.Vector3(bestNx, bestNy, bestNz),
+    material: bestMaterial,
+    penetrable: bestPenetrable,
+  };
 }
 
+/**
+ * Zero-allocation early-exit Line-Of-Sight test for AI & reticle checks.
+ */
 export function hasLineOfSight(
   from: THREE.Vector3,
   to: THREE.Vector3,
   boxes: ColliderBox[],
   cylinders: ColliderCylinder[]
 ): boolean {
-  const hit = intersectSegmentEnvironment(from, to, boxes, cylinders);
-  return hit === null || hit.t > 0.98;
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const dz = to.z - from.z;
+  const lenSq = dx * dx + dy * dy + dz * dz;
+  if (lenSq < 1e-8) return true;
+
+  // Terrain occlusion check (4 samples)
+  for (let s = 1; s <= 4; s++) {
+    const t = s * 0.25;
+    if (t > 0.98) break;
+    const sx = from.x + dx * t;
+    const sy = from.y + dy * t;
+    const sz = from.z + dz * t;
+    if (sy <= groundHeightAt(sx, sz)) {
+      return false;
+    }
+  }
+
+  const segMinX = Math.min(from.x, to.x);
+  const segMaxX = Math.max(from.x, to.x);
+  const segMinY = Math.min(from.y, to.y);
+  const segMaxY = Math.max(from.y, to.y);
+  const segMinZ = Math.min(from.z, to.z);
+  const segMaxZ = Math.max(from.z, to.z);
+
+  const invX = Math.abs(dx) > 1e-8 ? 1 / dx : 1e8;
+  const invY = Math.abs(dy) > 1e-8 ? 1 / dy : 1e8;
+  const invZ = Math.abs(dz) > 1e-8 ? 1 / dz : 1e8;
+
+  for (let i = 0; i < boxes.length; i++) {
+    const b = boxes[i];
+    if (
+      b.maxX < segMinX ||
+      b.minX > segMaxX ||
+      b.maxY < segMinY ||
+      b.minY > segMaxY ||
+      b.maxZ < segMinZ ||
+      b.minZ > segMaxZ
+    ) {
+      continue;
+    }
+    const tx1 = (b.minX - from.x) * invX;
+    const tx2 = (b.maxX - from.x) * invX;
+    let tmin = Math.min(tx1, tx2);
+    let tmax = Math.max(tx1, tx2);
+
+    const ty1 = (b.minY - from.y) * invY;
+    const ty2 = (b.maxY - from.y) * invY;
+    tmin = Math.max(tmin, Math.min(ty1, ty2));
+    tmax = Math.min(tmax, Math.max(ty1, ty2));
+
+    const tz1 = (b.minZ - from.z) * invZ;
+    const tz2 = (b.maxZ - from.z) * invZ;
+    tmin = Math.max(tmin, Math.min(tz1, tz2));
+    tmax = Math.min(tmax, Math.max(tz1, tz2));
+
+    if (tmax >= Math.max(0, tmin) && tmin >= 0 && tmin <= 0.98) {
+      return false;
+    }
+  }
+
+  const a = dx * dx + dz * dz;
+  if (a > 1e-8) {
+    const inv2a = 0.5 / a;
+    for (let i = 0; i < cylinders.length; i++) {
+      const c = cylinders[i];
+      if (
+        c.x + c.radius < segMinX ||
+        c.x - c.radius > segMaxX ||
+        c.z + c.radius < segMinZ ||
+        c.z - c.radius > segMaxZ ||
+        c.maxY < segMinY ||
+        c.minY > segMaxY
+      ) {
+        continue;
+      }
+      const fx = from.x - c.x;
+      const fz = from.z - c.z;
+      const b = 2 * (fx * dx + fz * dz);
+      const cc = fx * fx + fz * fz - c.radius * c.radius;
+      const disc = b * b - 4 * a * cc;
+      if (disc < 0) continue;
+      const t = (-b - Math.sqrt(disc)) * inv2a;
+      if (t >= 0 && t <= 0.98) {
+        const hy = from.y + dy * t;
+        if (hy >= c.minY && hy <= c.maxY) {
+          return false;
+        }
+      }
+    }
+  }
+
+  return true;
+}
+
+/**
+ * Drone EO/IR optical line-of-sight: pierces foliage, bushes, reeds & wooden screens,
+ * blocked only by terrain hills and heavy solid concrete/rock structures.
+ */
+export function hasDroneOpticLos(
+  from: THREE.Vector3,
+  to: THREE.Vector3,
+  boxes: ColliderBox[]
+): boolean {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const dz = to.z - from.z;
+  if (dx * dx + dy * dy + dz * dz < 1e-8) return true;
+
+  for (let s = 1; s <= 4; s++) {
+    const t = s * 0.25;
+    if (t > 0.98) break;
+    if (from.y + dy * t <= groundHeightAt(from.x + dx * t, from.z + dz * t) - 0.15) {
+      return false;
+    }
+  }
+
+  const segMinX = Math.min(from.x, to.x);
+  const segMaxX = Math.max(from.x, to.x);
+  const segMinY = Math.min(from.y, to.y);
+  const segMaxY = Math.max(from.y, to.y);
+  const segMinZ = Math.min(from.z, to.z);
+  const segMaxZ = Math.max(from.z, to.z);
+  const invX = Math.abs(dx) > 1e-8 ? 1 / dx : 1e8;
+  const invY = Math.abs(dy) > 1e-8 ? 1 / dy : 1e8;
+  const invZ = Math.abs(dz) > 1e-8 ? 1 / dz : 1e8;
+
+  for (let i = 0; i < boxes.length; i++) {
+    const b = boxes[i];
+    if (b.penetrable || b.material === 'wood' || b.material === 'sandbag') continue;
+    if (
+      b.maxX < segMinX ||
+      b.minX > segMaxX ||
+      b.maxY < segMinY ||
+      b.minY > segMaxY ||
+      b.maxZ < segMinZ ||
+      b.minZ > segMaxZ
+    ) {
+      continue;
+    }
+    const tx1 = (b.minX - from.x) * invX;
+    const tx2 = (b.maxX - from.x) * invX;
+    let tmin = Math.min(tx1, tx2);
+    let tmax = Math.max(tx1, tx2);
+
+    const ty1 = (b.minY - from.y) * invY;
+    const ty2 = (b.maxY - from.y) * invY;
+    tmin = Math.max(tmin, Math.min(ty1, ty2));
+    tmax = Math.min(tmax, Math.max(ty1, ty2));
+
+    const tz1 = (b.minZ - from.z) * invZ;
+    const tz2 = (b.maxZ - from.z) * invZ;
+    tmin = Math.max(tmin, Math.min(tz1, tz2));
+    tmax = Math.min(tmax, Math.max(tz1, tz2));
+
+    if (tmax >= Math.max(0, tmin) && tmin >= 0 && tmin <= 0.98) {
+      return false;
+    }
+  }
+  return true;
 }

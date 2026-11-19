@@ -1,6 +1,6 @@
 import { Faction } from './types';
 
-export type TacticalOrderId = 'assault' | 'follow' | 'hold' | 'suppress';
+export type TacticalOrderId = 'assault' | 'eliminate' | 'cover' | 'move' | 'follow';
 
 export interface RankDefinition {
   level: number; // 1..7
@@ -17,10 +17,10 @@ export interface TacticalOrderSpec {
 }
 
 export const TACTICAL_ORDERS: TacticalOrderSpec[] = [
-  { id: 'assault', label: 'AVANCER / ASSAUT', shortLabel: 'ASSAUT', hotkey: 'F1' },
-  { id: 'follow', label: 'SUIVRE / ESCORTE', shortLabel: 'SUIVRE', hotkey: 'F2' },
-  { id: 'hold', label: 'TENIR POSITION', shortLabel: 'TENIR', hotkey: 'F3' },
-  { id: 'suppress', label: 'TIR DE SUPPRESSION', shortLabel: 'SUPPR.', hotkey: 'F4' },
+  { id: 'assault', label: 'ASSAUT TACTIQUE', shortLabel: 'ASSAUT', hotkey: 'F1' },
+  { id: 'eliminate', label: 'ÉLIMINATION CIBLE', shortLabel: 'ÉLIMINER', hotkey: 'F2' },
+  { id: 'cover', label: 'À COUVERT (SACS)', shortLabel: 'COUVERT', hotkey: 'F3' },
+  { id: 'move', label: 'DÉPLACEMENT', shortLabel: 'DÉPLAC.', hotkey: 'F4' },
 ];
 
 export const ARMY_RANKS: RankDefinition[] = [
@@ -76,48 +76,60 @@ const LINGALA_ORDERS: Record<TacticalOrderId, CommandVoiceSet> = {
     issue: [
       'Bana mboka, kende liboso ! Boma banguna !',
       'Bo pumbwa ! Tokende na assaut sikoyo !',
-      'Allez les lions du Kivu ! Foncez sans regarder derrière !',
+      'Allez les lions du Kivu ! Foncez en formation d’assaut !',
     ],
     ack: [
       'Ya solo Chef ! Nazo kende liboso !',
       'Nayoki Chef ! Tozo beta bango !',
-      'Eh Papa ! Tika ngai na lakisa bango danse ya Kivu !',
+      'Eh Papa ! Tika ngai na lakisa bango assaut ya Kivu !',
+    ],
+  },
+  eliminate: {
+    issue: [
+      'Moko kaka ! Boma monguna wana tii akufa !',
+      'Tireur moko abeta cible wana sikoyo ! Tika ye te !',
+      'Un seul homme sur la cible marquée ! Neutralisez-le jusqu’au bout !',
+    ],
+    ack: [
+      'Nayoki Chef ! Ngai moko nazo silisa ye !',
+      'Cible verrouillée Chef ! Ako bika te lelo !',
+      'Tika na ngai mokonzi, nazo lala ye te tii akweya !',
+    ],
+  },
+  cover: {
+    issue: [
+      'Bo kima na sima ya ba sacs ya zelo ! Ko bima te !',
+      'À couvert ! Bo bama na sima ya protection !',
+      'Planquez-vous derrière les sacs de sable et tenez la ligne !',
+    ],
+    ack: [
+      'Esimbi Chef ! Toza na sima ya ba sacs !',
+      'Nayoki ! Position couverte makasi !',
+      'Chef, naza na nse ya sacs de sable, moto akomona ngai te !',
+    ],
+  },
+  move: {
+    issue: [
+      'Bo bouger kuna na point ya sika ! Vanda na couverture !',
+      'Déplacement tactique ! Bo kota na position kuna !',
+      'En mouvement par bonds vers la zone indiquée !',
+    ],
+    ack: [
+      'Nayoki Chef ! Nazo kende na position kuna !',
+      'Tozo tambola malembe na couverture mokonzi !',
+      'Reçu Chef ! Changement de secteur en cours !',
     ],
   },
   follow: {
     issue: [
       'Bo ya na sima na ngai ! Bo landa ngai !',
       'Batela ngai, tozo tambola elongo !',
-      'Restez collés à moi comme le fufu et le pondu ! En route !',
+      'Restez collés à mon escouade ! Regroupement immédiat !',
     ],
     ack: [
       'Nayoki Chef ! Toza na sima na yo !',
       'Nazo landa yo sikoyo mokonzi !',
-      'Sawa Chef, toza na sima lokola garde du corps ya Kinshasa !',
-    ],
-  },
-  hold: {
-    issue: [
-      'Telema wana ! Simba position makasi !',
-      'Ko ningana te ! Bo batela secteur oyo !',
-      'Ancrez vos bottes ici ! Pas un rebelle ne passe !',
-    ],
-    ack: [
-      'Esimbi Chef ! Nazo simba position !',
-      'Nayoki ! Moto moko akoleka awa te !',
-      'Chef, même le vent akoleka awa te sans ticket !',
-    ],
-  },
-  suppress: {
-    issue: [
-      'Beta masasi makasi wana ! Tika bango te !',
-      'Fungola moto kuna ! Bo pekisa banguna !',
-      'Envoyez la sauce ! Faites danser leurs casques !',
-    ],
-    ack: [
-      'Nazo beta bango masasi Chef !',
-      'Moto ezo pumbwa kuna mokonzi !',
-      'Wapi ! Chargeur ezo chauffer lokola mbabula Chef !',
+      'Sawa Chef, toza na sima lokola garde rapprochée !',
     ],
   },
 };
@@ -132,43 +144,55 @@ const SWAHILI_ORDERS: Record<TacticalOrderId, CommandVoiceSet> = {
     ack: [
       'Ndiyo Mkuu ! Tunasonga mbele sasa !',
       'Sawa Afande ! Tunashambulia !',
-      'Twende Afande ! Leo watajua sisi ni nani hapa Goma !',
+      'Twende Afande ! Tunakwenda mbele kwa kasi !',
+    ],
+  },
+  eliminate: {
+    issue: [
+      'Askari mmoja tu ! Mpige adui yule mpaka afe !',
+      'Lenga adui huyo peke yako ! Usimwache apumue !',
+      'Mmoja ashambulie shabaha ile mpaka ianguke !',
+    ],
+    ack: [
+      'Ndiyo Mkuu ! Mimi peke yangu namaliza huyo !',
+      'Shabaha imefungwa Afande ! Hatoki hai !',
+      'Sawa Mkuu, namfuata kwa risasi mpaka aanguke !',
+    ],
+  },
+  cover: {
+    issue: [
+      'Jificheni nyuma ya mifuko ya mchanga ! Kaa chini !',
+      'Chukua kinga nyuma ya vizuizi sasa hivi !',
+      'Piga magoti nyuma ya mifuko ya mchanga ! Linda mstari !',
+    ],
+    ack: [
+      'Sawa Mkuu ! Tumefichwa nyuma ya mifuko !',
+      'Ndiyo Afande, niko salama nyuma ya kinga !',
+      'Tumebana chini ya mifuko ya mchanga Afande !',
+    ],
+  },
+  move: {
+    issue: [
+      'Sogeeni haraka kwenda eneo lile ! Tafuta kinga huko !',
+      'Badilisha nafasi kwa mpangilio ! Songa kule !',
+      'Nenda kwenye alama ile kwa tahadhari !',
+    ],
+    ack: [
+      'Sawa Mkuu ! Tunasogea kwenye eneo lile !',
+      'Ndiyo Afande, tunabadilisha nafasi sasa !',
+      'Tuko njiani kwenda nafasi mpya Mkuu !',
     ],
   },
   follow: {
     issue: [
       'Nifuateni nyote ! Kaa karibu nami !',
       'Njoo nyuma yangu ! Linda njia !',
-      'Shikamana nami askari ! Hakuna kupoteana msituni !',
+      'Shikamana nami askari ! Kusanyikeni hapa !',
     ],
     ack: [
       'Sawa Mkuu ! Tunakufuata nyuma !',
       'Ndiyo Afande, niko karibu nawe !',
       'Tuko nyuma yako Mkuu, kama kivuli chako !',
-    ],
-  },
-  hold: {
-    issue: [
-      'Simama hapo ! Shika mstari imara !',
-      'Msisonge ! Linda eneo hili sasa !',
-      'Piga magoti nyuma ya mawe ! Msiache hata sentimita !',
-    ],
-    ack: [
-      'Sawa Mkuu ! Tunashika nafasi hii !',
-      'Ndiyo Afande, hakuna atakayepita !',
-      'Hapa tumekaa imara kama mlima Nyiragongo Mkuu !',
-    ],
-  },
-  suppress: {
-    issue: [
-      'Piga moto mfululizo kule ! Wafunge chini !',
-      'Risasi zote kule ! Usiwape nafasi !',
-      'Fungua moto mkali ! Wasilale usingizi kule !',
-    ],
-    ack: [
-      'Tunapiga moto mfululizo Mkuu !',
-      'Sawa Afande, risasi zinamiminika !',
-      'Moto unawaka Afande, hata ndege hawawezi kupita !',
     ],
   },
 };

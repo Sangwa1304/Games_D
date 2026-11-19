@@ -16,6 +16,7 @@ interface MinimapProps {
   }>;
   orderMarkerPos: { x: number; z: number } | null;
   enemyRadarRange?: number;
+  size?: number;
 }
 
 const SIZE = 136;
@@ -63,6 +64,7 @@ export const Minimap: React.FC<MinimapProps> = ({
   sectors,
   orderMarkerPos,
   enemyRadarRange = 32,
+  size = SIZE,
 }) => {
   const sinYaw = Math.sin(playerYaw);
   const cosYaw = Math.cos(playerYaw);
@@ -92,14 +94,14 @@ export const Minimap: React.FC<MinimapProps> = ({
   const northLabelPos = worldToRadar(playerX, playerZ - 64, playerX, playerZ, sinYaw, cosYaw, true);
 
   return (
-    <div className="pointer-events-none select-none flex flex-col items-start">
-      <div className="rounded-lg bg-[#0b120e]/88 border border-stone-700/80 p-1.5 shadow-lg">
+    <div className="pointer-events-none select-none flex flex-col items-center">
+      <div className="rounded-lg bg-[#0b120e]/88 border border-stone-700/80 p-2 shadow-lg">
         <svg
-          width={SIZE}
-          height={SIZE}
+          width={size}
+          height={size}
           viewBox={`0 0 ${SIZE} ${SIZE}`}
           className="block rounded-full bg-[#09100c]"
-          aria-label="Mini-carte tactique"
+          aria-label="Carte tactique"
         >
           <defs>
             <clipPath id="kivu-minimap-clip">
@@ -249,10 +251,13 @@ export const Minimap: React.FC<MinimapProps> = ({
               }
               return (
                 <g key={u.id} transform={`translate(${p.x}, ${p.y})`}>
+                  {u.marked && (
+                    <circle r={6.2} fill="none" stroke="#fb923c" strokeWidth="1.1" strokeOpacity="0.9" />
+                  )}
                   <polygon
                     points="0,-4 4,0 0,4 -4,0"
-                    fill="#ef4444"
-                    stroke="#240808"
+                    fill={u.marked ? '#f97316' : '#ef4444'}
+                    stroke={u.marked ? '#fef08a' : '#240808'}
                     strokeWidth="0.9"
                   />
                   {u.isHuman && (

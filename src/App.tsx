@@ -2,14 +2,15 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  */
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Maximize2, RotateCw } from 'lucide-react';
 import { ArmoryModal } from './components/ArmoryModal';
 import { PauseEndModal } from './components/PauseEndModal';
 import { TacticalHud } from './components/TacticalHud';
 import { TitleScreen } from './components/TitleScreen';
 import { GameEngine } from './game/GameEngine';
 import { DEFAULT_GAMEPAD_SETTINGS } from './game/gamepad';
-import { CombatModeId, Faction, HudSnapshot } from './game/types';
+import { CombatModeId, Faction, GamepadMenuEvent, HudSnapshot } from './game/types';
 import { DEFAULT_ARMY_LOADOUT } from './game/weapons';
 
 const INITIAL_HUD: HudSnapshot = {
@@ -67,6 +68,13 @@ const INITIAL_HUD: HudSnapshot = {
   timeSinceDamage: 10,
   isRegenerating: false,
   aimingAtAlly: null,
+  aimingAtEnemy: false,
+  aimingEnemyDist: null,
+  aimingEnemyName: null,
+  activeEliminateTargetName: null,
+  scopeRangeMeters: null,
+  scopeDropSvgUnits: 0,
+  scopeDropTicks: [],
   friendlyFireWarnTimer: 0,
   killcam: null,
   armyTickets: 160,
@@ -114,6 +122,15 @@ const INITIAL_HUD: HudSnapshot = {
   orderMarkerPos: null,
   minimapUnits: [],
   minimapEnemyRange: 32,
+  droneActive: false,
+  droneBattery: 100,
+  droneRangeMeters: 0,
+  droneMaxRange: 95,
+  droneAltitudeMeters: 0,
+  droneMarkedCount: 0,
+  droneAimingEnemy: false,
+  droneAimingEnemyName: null,
+  droneAimingEnemyDist: null,
   lanConnected: false,
   lanRoomCode: null,
   lanPlayerName: 'Soldat-Kivu',
@@ -124,6 +141,9 @@ const INITIAL_HUD: HudSnapshot = {
   lanPeers: [],
   lanUdpActive: false,
   lanUdpPort: 41234,
+  isMobileDevice: false,
+  isPortrait: typeof window !== 'undefined' ? window.innerHeight > window.innerWidth : false,
+  isFullscreen: false,
 };
 
 export default function App() {
@@ -159,7 +179,7 @@ export default function App() {
     }
     return 0.0021;
   });
-  const [armoryOpen, setArmoryOpen] = useState(false);
+  const [armoryOpen, setArmoryOpen] = useState<boolean>(false);
 
   const [initialRoomCode] = useState<string>(() => {
     const params = new URLSearchParams(window.location.search);
@@ -190,10 +210,28 @@ export default function App() {
     setSelectedMode(hud.combatMode);
   }, [hud.combatMode]);
 
+  const gamepadNavActive = hud.gamepadConnected && hud.gamepadSettings.enabled;
+
+  const subscribeGamepadNav = useCallback((cb: (ev: GamepadMenuEvent) => void) => {
+    if (!engineRef.current) return () => {};
+    return engineRef.current.onGamepadMenuEvent(cb);
+  }, []);
+
+  useEffect(() => {
+    engineRef.current?.setArmoryOpen(armoryOpen);
+  }, [armoryOpen]);
+
   useEffect(() => {
     const onGlobalKey = (e: KeyboardEvent) => {
       const tag = (document.activeElement as HTMLElement | null)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+
+      const inSettingsOrArmory =
+        armoryOpen || hud.phase === 'paused' || hud.phase === 'victory' || hud.phase === 'defeat';
+      if (inSettingsOrArmory && gamepadNavActive) {
+        return;
+      }
+
       if (e.code === 'Enter' && hud.phase === 'title' && !armoryOpen) {
         engineRef.current?.startGame(selectedFaction, selectedMode);
       } else if (e.code === 'KeyB' && !e.repeat) {
@@ -211,7 +249,7 @@ export default function App() {
     };
     window.addEventListener('keydown', onGlobalKey);
     return () => window.removeEventListener('keydown', onGlobalKey);
-  }, [hud.phase, selectedFaction, selectedMode, armoryOpen]);
+  }, [hud.phase, selectedFaction, selectedMode, armoryOpen, gamepadNavActive]);
 
   const handleToggleMute = () => {
     const next = !muted;
@@ -225,7 +263,7 @@ export default function App() {
   };
 
   return (
-    <div className="relative w-screen h-screen overflow-hidden bg-[#0d1310]">
+    <div className="relative w-[100dvw] h-[100dvh] overflow-hidden bg-[#0d1310]">
       {/* Dedicated isolated WebGL canvas mount */}
       <div ref={canvasMountRef} className="absolute inset-0 w-full h-full" />
 
@@ -246,6 +284,9 @@ export default function App() {
           onOpenArmory={() => setArmoryOpen(true)}
           totalZonesCount={hud.totalZonesCount}
           gamepadConnected={hud.gamepadConnected}
+          isMobileDevice={hud.isMobileDevice}
+          isFullscreen={hud.isFullscreen}
+          onToggleFullscreen={() => engineRef.current?.toggleFullscreen()}
           lanConnected={hud.lanConnected}
           lanIps={hud.lanIps}
           lanPort={hud.lanPort}
@@ -277,9 +318,13 @@ export default function App() {
           muted={muted}
           onToggleMute={handleToggleMute}
           onRequestLock={() => engineRef.current?.requestPointerLock()}
-          onToggleStatusPanel={() => engineRef.current?.toggleStatusPanel()}
-          onToggleCommandPanel={() => engineRef.current?.toggleCommandPanel()}
+          onToggleFullscreen={() => engineRef.current?.toggleFullscreen()}
           onSkipKillcam={() => engineRef.current?.skipKillcam()}
+          onTouchMove={(x, y, sprint) => engineRef.current?.setTouchMove(x, y, sprint)}
+          onTouchLookDelta={(dx, dy) => engineRef.current?.addTouchLookDelta(dx, dy)}
+          onTouchFire={(held) => engineRef.current?.setTouchFire(held)}
+          onTouchAds={(active) => engineRef.current?.setTouchAds(active)}
+          onTouchAction={(action) => engineRef.current?.triggerTouchAction(action)}
         />
       )}
 
@@ -288,6 +333,9 @@ export default function App() {
           hud={hud}
           muted={muted}
           sensitivity={sensitivity}
+          armoryOpen={armoryOpen}
+          subscribeGamepadNav={subscribeGamepadNav}
+          onGamepadRumble={(strong) => engineRef.current?.rumbleMenu(strong)}
           onToggleMute={handleToggleMute}
           onChangeSensitivity={handleSensitivity}
           onChangeSfxVolume={(v) => engineRef.current?.setSfxVolume(v)}
@@ -308,9 +356,42 @@ export default function App() {
         <ArmoryModal
           loadout={hud.loadout}
           faction={hud.playerFaction}
+          gamepadNavActive={gamepadNavActive}
+          subscribeGamepadNav={subscribeGamepadNav}
+          onGamepadRumble={(strong) => engineRef.current?.rumbleMenu(strong)}
           onSaveLoadout={(next) => engineRef.current?.setPlayerLoadout(next)}
           onClose={() => setArmoryOpen(false)}
         />
+      )}
+
+      {/* Mandatory Android Landscape & Direct Fullscreen Expansion Gate */}
+      {hud.isMobileDevice && hud.isPortrait && (
+        <div className="fixed inset-0 z-50 bg-[#090e0b]/98 flex flex-col items-center justify-center p-6 text-center select-none">
+          <div className="max-w-sm w-full rounded-xl bg-[#101813] border border-amber-500/70 p-5 space-y-4 shadow-2xl">
+            <div className="w-12 h-12 mx-auto rounded-full bg-amber-950/80 border border-amber-500/70 flex items-center justify-center text-amber-300">
+              <RotateCw className="w-6 h-6" />
+            </div>
+            <div className="space-y-1.5">
+              <h2 className="text-base font-black uppercase tracking-wider text-stone-100">
+                Écran Horizontal Obligatoire
+              </h2>
+              <p className="text-xs text-stone-300 leading-relaxed">
+                Kivu : Ligne de Front se joue uniquement en mode horizontal plein écran sur Android afin d&apos;afficher toute la scène et l&apos;armurerie.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => engineRef.current?.requestFullscreenImmersive()}
+              className="w-full py-3 px-4 rounded-lg bg-amber-600 hover:bg-amber-500 active:scale-95 text-stone-950 font-black text-xs uppercase tracking-widest inline-flex items-center justify-center gap-2 cursor-pointer transition-transform shadow-lg"
+            >
+              <Maximize2 className="w-4 h-4" />
+              Agrandir en Horizontal
+            </button>
+            <p className="text-[10.5px] text-stone-400">
+              Pivotez également votre téléphone à l&apos;horizontale si la rotation système est verrouillée.
+            </p>
+          </div>
+        </div>
       )}
     </div>
   );

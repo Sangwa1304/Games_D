@@ -4,9 +4,12 @@ import {
   Crosshair,
   Gamepad2,
   Map as MapIcon,
+  Maximize2,
+  Minimize2,
   Radar,
   RefreshCw,
   Shield,
+  Smartphone,
   Users,
   Wifi,
 } from 'lucide-react';
@@ -23,6 +26,9 @@ interface TitleScreenProps {
   onOpenArmory: () => void;
   totalZonesCount: number;
   gamepadConnected: boolean;
+  isMobileDevice?: boolean;
+  isFullscreen?: boolean;
+  onToggleFullscreen?: () => void;
   lanConnected: boolean;
   lanIps: string[];
   lanPort: number;
@@ -50,6 +56,9 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
   onOpenArmory,
   totalZonesCount,
   gamepadConnected,
+  isMobileDevice = false,
+  isFullscreen = false,
+  onToggleFullscreen,
   lanConnected,
   lanIps,
   lanPort,
@@ -85,7 +94,7 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-20 flex flex-col justify-between p-4 md:p-7 pointer-events-none overflow-y-auto">
+    <div className="fixed inset-0 z-20 flex flex-col justify-between p-3.5 sm:p-4 md:p-7 pointer-events-none overflow-y-auto touch-pan-y">
       {/* Subtle dark edge vignette */}
       <div
         className="fixed inset-0 -z-10"
@@ -107,6 +116,31 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
               <Gamepad2 className="w-3.5 h-3.5" />
               DualShock Détectée
             </div>
+          )}
+          {isMobileDevice && (
+            <div className="inline-flex items-center gap-1.5 px-2 py-1 text-[11px] font-semibold tracking-wider uppercase text-emerald-300 bg-[#0f1d15]/92 border border-emerald-700/70 rounded">
+              <Smartphone className="w-3.5 h-3.5" />
+              Mobile Android
+            </div>
+          )}
+          {isMobileDevice && onToggleFullscreen && (
+            <button
+              type="button"
+              onClick={onToggleFullscreen}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-bold tracking-wider uppercase text-amber-200 bg-[#1d2215]/95 hover:bg-[#2a311e] border border-amber-500/70 rounded cursor-pointer active:scale-95 transition-transform"
+            >
+              {isFullscreen ? (
+                <>
+                  <Minimize2 className="w-3.5 h-3.5 text-amber-300" />
+                  Réduire Écran
+                </>
+              ) : (
+                <>
+                  <Maximize2 className="w-3.5 h-3.5 text-amber-300" />
+                  Plein Écran (Masquer Barre Web)
+                </>
+              )}
+            </button>
           )}
         </div>
 
@@ -470,6 +504,10 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
                   Appuyez sur <strong className="text-sky-300">✕ Croix</strong> ou{' '}
                   <strong className="text-stone-200">Entrée</strong>
                 </>
+              ) : isMobileDevice ? (
+                <>
+                  Touchez <strong className="text-amber-300">Déployer</strong> (passage plein écran automatique)
+                </>
               ) : (
                 <>
                   <strong className="text-stone-200">Entrée</strong> pour lancer ·{' '}
@@ -483,8 +521,10 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
 
         <div className="text-[11px] text-stone-300/90 bg-[#0e1410]/92 border border-stone-800 px-3.5 py-2 rounded-md tracking-wide">
           {gamepadConnected
-            ? 'DualShock : Sticks Dépl./Visée · L2/R2 Viser/Tirer · L2+L3 Zoom Lunette · L1/R1 Fumigène/Frag · □ Recharger · △/↓ Armes · ←/→/↑ Ordres · ✕ Saut · L3 Sprint · ○ Accroupi/Glisse · R3 Allongé · Select État · Pavé Grades'
-            : 'Clavier/Souris : WASD/ZQSD Dépl. · Espace Saut · Shift Sprint (ou Zoom Lunette) · C Accroupi/Glissade · X Allongé/Plongeon · 1-3 Armes · B Armurerie · G Frag · E Fumigène · F1-F4 Ordres · I État · Tab Grades · Echap Paramètres'}
+            ? 'DualShock : Stick G Marche · L3 Avant Sprint · Stick D Visée · L2/R2 Viser/Tirer · L1/R1 Fumi/Frag · □ Rech · △/↓ Armes · ↓ Maintenu Drone · ✕ Saut · ○ Accroupi/Glisse · R3 Allongé'
+            : isMobileDevice
+            ? 'Tactile Android (horizontal plein écran) : Joystick gauche Marche · SPRINT · DRN Drone Recon · Zone droite Caméra · TIR / VISER / ZOOM / MARQUER (masqués si manette connectée)'
+            : 'Clavier/Souris : WASD/ZQSD Marche · Espace Saut · Shift Sprint/Zoom · C Accroupi · X Allongé · 1-3 Armes · H/4 Drone Recon (M/Clic G Marquer) · B Armurerie · F1-F4 Ordres · Echap Paramètres'}
         </div>
       </div>
     </div>

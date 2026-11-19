@@ -1,35 +1,37 @@
 import React from 'react';
 import {
   Award,
-  ChevronDown,
-  ChevronUp,
   CloudFog,
-  Compass,
   Crosshair,
   Flame,
-  Gamepad2,
-  HeartPulse,
-  MapPin,
+  Maximize2,
+  Minimize2,
+  Pause,
+  Radar,
   Radio,
   Shield,
   ShieldAlert,
   Volume2,
   VolumeX,
-  Wifi,
 } from 'lucide-react';
 import { TACTICAL_ORDERS } from '../game/ranks';
 import { HudSnapshot } from '../game/types';
 import { WEAPON_SPECS } from '../game/weapons';
-import { Minimap } from './Minimap';
+import { CompassBar } from './CompassBar';
+import { TouchActionId, TouchControls } from './TouchControls';
 
 interface TacticalHudProps {
   hud: HudSnapshot;
   muted: boolean;
   onToggleMute: () => void;
   onRequestLock: () => void;
-  onToggleStatusPanel: () => void;
-  onToggleCommandPanel: () => void;
+  onToggleFullscreen: () => void;
   onSkipKillcam: () => void;
+  onTouchMove: (x: number, y: number, sprint: boolean) => void;
+  onTouchLookDelta: (dx: number, dy: number) => void;
+  onTouchFire: (held: boolean) => void;
+  onTouchAds: (active: boolean) => void;
+  onTouchAction: (action: TouchActionId) => void;
 }
 
 function formatTimer(totalSec: number): string {
@@ -44,9 +46,13 @@ export const TacticalHud: React.FC<TacticalHudProps> = ({
   muted,
   onToggleMute,
   onRequestLock,
-  onToggleStatusPanel,
-  onToggleCommandPanel,
+  onToggleFullscreen,
   onSkipKillcam,
+  onTouchMove,
+  onTouchLookDelta,
+  onTouchFire,
+  onTouchAds,
+  onTouchAction,
 }) => {
   const isTdm = hud.combatMode === 'tdm';
   const leftVal = isTdm ? hud.armyScore : hud.armyTickets;
@@ -54,10 +60,9 @@ export const TacticalHud: React.FC<TacticalHudProps> = ({
   const denom = Math.max(1, isTdm ? hud.scoreLimit : hud.maxTickets);
   const armyPct = Math.min(100, Math.round((leftVal / denom) * 100));
   const rebelPct = Math.min(100, Math.round((rightVal / denom) * 100));
-  const activeSectors = hud.sectors.filter((s) => s.active);
 
   const gap = Math.min(34, Math.max(6, hud.crosshairSpread));
-  const showSniperScope = hud.isAds && hud.weaponCategory === 'sniper' && hud.hp > 0;
+  const showSniperScope = hud.isAds && hud.weaponCategory === 'sniper' && hud.hp > 0 && !hud.droneActive;
   const activeScopeType = WEAPON_SPECS[hud.weaponId]?.scopeType ?? 'pso';
   const killcamActive = hud.hp <= 0 && Boolean(hud.killcam?.active);
 
@@ -232,224 +237,273 @@ export const TacticalHud: React.FC<TacticalHudProps> = ({
         </>
       )}
 
-      {/* Multi-Reticle Precision Sniper Scope Overlay with Live Calibrated Zoom */}
-      {showSniperScope && (
-        <div className="fixed inset-0 flex items-center justify-center">
-          <div
-            className="w-full h-full flex flex-col items-center justify-center relative"
-            style={{
-              background:
-                'radial-gradient(circle at center, transparent 28.5%, rgba(6, 9, 8, 0.97) 30%)',
-            }}
-          >
-            <svg viewBox="0 0 200 200" className="w-[57vmin] h-[57vmin]">
-              <circle cx="100" cy="100" r="96" fill="none" stroke="#1c1917" strokeWidth="2.4" />
-              {activeScopeType === 'mildot' ? (
-                <>
-                  <line x1="10" y1="100" x2="190" y2="100" stroke="#0f172a" strokeWidth="0.7" />
-                  <line x1="100" y1="10" x2="100" y2="190" stroke="#0f172a" strokeWidth="0.7" />
-                  {[40, 55, 70, 85, 115, 130, 145, 160].map((pos) => (
-                    <React.Fragment key={pos}>
-                      <circle cx={pos} cy="100" r="1.2" fill="#0f172a" />
-                      <circle cx="100" cy={pos} r="1.2" fill="#0f172a" />
-                    </React.Fragment>
-                  ))}
-                  <circle cx="100" cy="100" r="1.15" fill="#ef4444" />
-                </>
-              ) : activeScopeType === 'heavy' ? (
-                <>
-                  <line x1="10" y1="100" x2="84" y2="100" stroke="#0f172a" strokeWidth="1.4" />
-                  <line x1="116" y1="100" x2="190" y2="100" stroke="#0f172a" strokeWidth="1.4" />
-                  <line x1="100" y1="12" x2="100" y2="84" stroke="#0f172a" strokeWidth="1.1" />
-                  <line x1="100" y1="116" x2="100" y2="188" stroke="#0f172a" strokeWidth="1.4" />
-                  <line x1="84" y1="100" x2="116" y2="100" stroke="#0f172a" strokeWidth="0.55" />
-                  <line x1="100" y1="84" x2="100" y2="116" stroke="#0f172a" strokeWidth="0.55" />
-                  {[114, 126, 138, 150].map((y, idx) => (
-                    <line
-                      key={y}
-                      x1={96 - idx * 1.4}
-                      y1={y}
-                      x2={104 + idx * 1.4}
-                      y2={y}
-                      stroke="#0f172a"
-                      strokeWidth="0.9"
+      {/* Multi-Reticle Precision Sniper Scope Overlay with Live Calibrated Zoom & Vertical Drop */}
+      {showSniperScope && (() => {
+        const impactY = Math.min(186, Math.max(100, 100 + hud.scopeDropSvgUnits));
+        const enemyLocked = hud.aimingAtEnemy;
+        let lastLabelY = 100;
+        const visibleTicks = hud.scopeDropTicks.map((tick) => {
+          const showLabel = tick.ySvg >= 103.2 && tick.ySvg - lastLabelY >= 4.4 && tick.ySvg <= 184;
+          if (showLabel) lastLabelY = tick.ySvg;
+          return { ...tick, showLabel };
+        });
+
+        return (
+          <div className="fixed inset-0 flex items-center justify-center">
+            <div
+              className="w-full h-full flex flex-col items-center justify-center relative"
+              style={{
+                background:
+                  'radial-gradient(circle at center, transparent 28.5%, rgba(6, 9, 8, 0.97) 30%)',
+              }}
+            >
+              <svg viewBox="0 0 200 200" className="w-[57vmin] h-[57vmin]">
+                <circle cx="100" cy="100" r="96" fill="none" stroke="#1c1917" strokeWidth="2.4" />
+                {activeScopeType === 'mildot' ? (
+                  <>
+                    <line x1="10" y1="100" x2="190" y2="100" stroke="#0f172a" strokeWidth="0.7" />
+                    <line x1="100" y1="10" x2="100" y2="190" stroke="#0f172a" strokeWidth="0.7" />
+                    {[40, 55, 70, 85, 115, 130, 145, 160].map((pos) => (
+                      <React.Fragment key={pos}>
+                        <circle cx={pos} cy="100" r="1.15" fill="#0f172a" />
+                        <circle cx="100" cy={pos} r="1.15" fill="#0f172a" />
+                      </React.Fragment>
+                    ))}
+                  </>
+                ) : activeScopeType === 'heavy' ? (
+                  <>
+                    <line x1="10" y1="100" x2="84" y2="100" stroke="#0f172a" strokeWidth="1.4" />
+                    <line x1="116" y1="100" x2="190" y2="100" stroke="#0f172a" strokeWidth="1.4" />
+                    <line x1="100" y1="12" x2="100" y2="84" stroke="#0f172a" strokeWidth="1.1" />
+                    <line x1="100" y1="116" x2="100" y2="188" stroke="#0f172a" strokeWidth="1.4" />
+                    <line x1="84" y1="100" x2="116" y2="100" stroke="#0f172a" strokeWidth="0.55" />
+                    <line x1="100" y1="84" x2="100" y2="116" stroke="#0f172a" strokeWidth="0.55" />
+                  </>
+                ) : (
+                  <>
+                    {/* Illuminated PSO-1 stadia */}
+                    <line x1="12" y1="100" x2="90" y2="100" stroke="#0f172a" strokeWidth="0.95" />
+                    <line x1="110" y1="100" x2="188" y2="100" stroke="#0f172a" strokeWidth="0.95" />
+                    {[42, 58, 74, 126, 142, 158].map((tickX) => (
+                      <line key={tickX} x1={tickX} y1="97.5" x2={tickX} y2="102.5" stroke="#0f172a" strokeWidth="0.8" />
+                    ))}
+                    <line x1="100" y1="104" x2="100" y2="184" stroke="#0f172a" strokeWidth="0.95" />
+                    <polyline
+                      points="95.5,104.5 100,100 104.5,104.5"
+                      fill="none"
+                      stroke={enemyLocked ? '#ef4444' : '#f59e0b'}
+                      strokeWidth="1.25"
                     />
-                  ))}
-                  <circle cx="100" cy="100" r="1.1" fill="#22c55e" />
-                </>
-              ) : (
-                <>
-                  {/* Illuminated PSO-1 stadia */}
-                  <line x1="12" y1="100" x2="90" y2="100" stroke="#0f172a" strokeWidth="0.95" />
-                  <line x1="110" y1="100" x2="188" y2="100" stroke="#0f172a" strokeWidth="0.95" />
-                  {[42, 58, 74, 126, 142, 158].map((tickX) => (
-                    <line key={tickX} x1={tickX} y1="97.5" x2={tickX} y2="102.5" stroke="#0f172a" strokeWidth="0.8" />
-                  ))}
-                  <line x1="100" y1="106" x2="100" y2="184" stroke="#0f172a" strokeWidth="0.95" />
-                  <polyline
-                    points="95.5,104.5 100,100 104.5,104.5"
+                  </>
+                )}
+
+                {/* Calibrated Vertical Ballistic Drop Stadia Ticks (75m, 125m, 175m, 225m) */}
+                {visibleTicks.map((tick) =>
+                  tick.ySvg >= 100.7 && tick.ySvg <= 186 ? (
+                    <g key={tick.dist}>
+                      <line
+                        x1="96.8"
+                        y1={tick.ySvg}
+                        x2="103.2"
+                        y2={tick.ySvg}
+                        stroke="#38bdf8"
+                        strokeOpacity="0.82"
+                        strokeWidth="0.7"
+                      />
+                      {tick.showLabel && (
+                        <text
+                          x="105.5"
+                          y={tick.ySvg + 1.3}
+                          fill="#bae6fd"
+                          fillOpacity="0.85"
+                          fontSize="4.1"
+                          fontWeight="700"
+                          fontFamily="monospace"
+                        >
+                          {tick.dist}m
+                        </text>
+                      )}
+                    </g>
+                  ) : null
+                )}
+
+                {/* Live Vertical Drop Axis & Calculated Impact Point */}
+                {impactY > 100.6 && (
+                  <>
+                    <line
+                      x1="100"
+                      y1="100"
+                      x2="100"
+                      y2={impactY}
+                      stroke={enemyLocked ? '#ef4444' : '#fbbf24'}
+                      strokeWidth="0.75"
+                      strokeDasharray="1.6 1.2"
+                      strokeOpacity="0.9"
+                    />
+                    <line
+                      x1="94.8"
+                      y1={impactY}
+                      x2="105.2"
+                      y2={impactY}
+                      stroke={enemyLocked ? '#ef4444' : '#fbbf24'}
+                      strokeWidth="1.0"
+                    />
+                    <circle
+                      cx="100"
+                      cy={impactY}
+                      r="1.35"
+                      fill={enemyLocked ? '#ef4444' : '#fbbf24'}
+                      stroke="#090d0b"
+                      strokeWidth="0.45"
+                    />
+                  </>
+                )}
+
+                {/* Center Aiming Dot (Crimson Target Lock when hovering enemy through fog/smoke) */}
+                {enemyLocked && (
+                  <circle
+                    cx="100"
+                    cy="100"
+                    r="3.2"
                     fill="none"
                     stroke="#ef4444"
-                    strokeWidth="1.25"
+                    strokeOpacity="0.78"
+                    strokeWidth="0.8"
                   />
-                  <circle cx="100" cy="100" r="0.85" fill="#ef4444" />
-                  <polyline points="97,113 100,109 103,113" fill="none" stroke="#0f172a" strokeWidth="0.85" />
-                  <polyline points="97.5,122 100,118.5 102.5,122" fill="none" stroke="#0f172a" strokeWidth="0.8" />
-                </>
-              )}
-            </svg>
+                )}
+                <circle
+                  cx="100"
+                  cy="100"
+                  r={enemyLocked ? 1.6 : 1.0}
+                  fill={enemyLocked ? '#ef4444' : activeScopeType === 'heavy' ? '#22c55e' : '#e7e5e4'}
+                />
+              </svg>
 
-            <div className="mt-2 inline-flex items-center gap-2 px-3 py-1 rounded bg-[#0c120e]/90 border border-sky-700/70 text-[11px] font-bold uppercase tracking-wider text-sky-300">
-              <span>Optique {hud.sniperZoomLabel || '6×'}</span>
-              <span className="text-stone-500">·</span>
-              <span className="text-stone-300">
-                [{hud.gamepadConnected ? 'L3' : 'Shift / Molette'}] Changer Zoom
-              </span>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Top Left: Compact Controls Row + Tactical Zone + Minimap */}
-      {!killcamActive && (
-        <div className="fixed top-3 left-3 flex flex-col items-start gap-1.5">
-        <div className="flex flex-wrap items-center gap-1.5 pointer-events-auto">
-          <button
-            type="button"
-            onClick={onToggleMute}
-            title={muted ? 'Activer le son' : 'Couper le son'}
-            aria-label={muted ? 'Activer le son' : 'Couper le son'}
-            className="p-1.5 rounded bg-[#101713]/85 border border-stone-700/70 text-stone-200 hover:border-stone-500 cursor-pointer"
-          >
-            {muted ? <VolumeX className="w-3.5 h-3.5 text-red-400" /> : <Volume2 className="w-3.5 h-3.5 text-amber-400" />}
-          </button>
-
-          <div className="inline-flex items-center gap-1.5 px-2 py-1 rounded bg-[#101713]/85 border border-stone-700/70 text-[11px] text-stone-300 tabular-nums pointer-events-none">
-            <span className="text-stone-400">ÉLIM</span>
-            <strong className="text-stone-100">{hud.playerKills}</strong>
-            <span className="text-stone-600">|</span>
-            <Compass className="w-3 h-3 text-amber-400" />
-            <strong className="text-amber-300">{hud.compassHeadingDeg}°</strong>
-          </div>
-
-          <div className="inline-flex items-center gap-1 px-2 py-1 rounded bg-[#101713]/85 border border-stone-700/70 text-[10.5px] font-semibold text-amber-200 pointer-events-none">
-            <MapPin className="w-3 h-3 text-amber-400" />
-            <span className="max-w-[165px] truncate">{hud.currentZoneName}</span>
-          </div>
-
-          {hud.lanRoomCode && (
-            <div className="inline-flex items-center gap-1 px-2 py-1 rounded bg-[#0d2419]/90 border border-emerald-600/70 text-[10px] font-bold text-emerald-200 pointer-events-none tabular-nums">
-              <Wifi className="w-3 h-3 text-emerald-400" />
-              <span>{hud.lanRoomCode}</span>
-              <span className="text-emerald-400">({hud.lanPlayerCount})</span>
-            </div>
-          )}
-
-          {hud.gamepadConnected && (
-            <div className="inline-flex items-center gap-1 px-2 py-1 rounded bg-[#0f1c24]/90 border border-sky-700/70 text-[10px] font-semibold text-sky-300 pointer-events-none">
-              <Gamepad2 className="w-3 h-3" />
-              PS
-            </div>
-          )}
-        </div>
-
-        <Minimap
-          playerX={hud.playerPosX}
-          playerZ={hud.playerPosZ}
-          playerYaw={hud.playerYaw}
-          units={hud.minimapUnits}
-          sectors={hud.sectors}
-          orderMarkerPos={hud.orderMarkerPos}
-          enemyRadarRange={hud.minimapEnemyRange}
-        />
-        </div>
-      )}
-
-      {/* Top Center Compact Mode, Timer & Frontline Tickets/Scores */}
-      {!killcamActive && (
-        <div className="fixed top-3 left-1/2 -translate-x-1/2 flex flex-col items-center gap-1.5">
-        <div className="flex items-center gap-2.5 px-3 py-1.5 rounded-lg bg-[#101713]/88 border border-stone-700/70">
-          <div className="flex items-center gap-1.5">
-            <span className="text-[10px] font-bold uppercase tracking-wider text-sky-400">
-              Armée
-            </span>
-            <div className="w-16 h-1.5 bg-stone-800 rounded overflow-hidden">
-              <div
-                className="h-full bg-sky-500 transition-all duration-200"
-                style={{ width: `${armyPct}%` }}
-              />
-            </div>
-            <span className="text-xs font-extrabold text-stone-100 tabular-nums w-8 text-right">
-              {leftVal}
-            </span>
-          </div>
-
-          <div className="flex items-center gap-1 px-2 border-x border-stone-700/70">
-            {isTdm ? (
-              <span className="text-[10px] font-black tracking-wider text-amber-300 tabular-nums">
-                MME /{hud.scoreLimit} · {formatTimer(hud.matchTimeRemaining)}
-              </span>
-            ) : (
-              <>
-                {activeSectors.map((sec) => {
-                  const badgeColor =
-                    sec.owner === 'army'
-                      ? 'bg-sky-600 border-sky-400 text-white'
-                      : sec.owner === 'rebels'
-                      ? 'bg-red-600 border-red-400 text-white'
-                      : 'bg-stone-800 border-amber-500/80 text-amber-300';
-                  return (
-                    <div
-                      key={sec.id}
-                      title={sec.name}
-                      className={`w-5 h-5 rounded flex items-center justify-center text-[10px] font-black border ${badgeColor}`}
-                    >
-                      {sec.id}
-                    </div>
-                  );
-                })}
-                <span className="ml-1 text-[10px] font-bold text-stone-400 tabular-nums">
-                  {formatTimer(hud.matchTimeRemaining)}
+              <div className="mt-2 inline-flex flex-wrap items-center justify-center gap-2 px-3 py-1 rounded bg-[#0c120e]/90 border border-sky-700/70 text-[11px] font-bold uppercase tracking-wider text-sky-300 tabular-nums">
+                <span>Optique {hud.sniperZoomLabel || '6×'}</span>
+                {hud.scopeRangeMeters !== null && (
+                  <>
+                    <span className="text-stone-500">·</span>
+                    <span className="text-amber-300">Dist. {hud.scopeRangeMeters}m</span>
+                  </>
+                )}
+                {enemyLocked && hud.aimingEnemyDist !== null && (
+                  <>
+                    <span className="text-stone-500">·</span>
+                    <span className="text-red-400 font-black">CIBLE {hud.aimingEnemyDist}m</span>
+                  </>
+                )}
+                <span className="text-stone-500">·</span>
+                <span className="text-stone-300">
+                  [{hud.gamepadConnected ? 'L3' : 'Shift / Molette'}] Zoom
                 </span>
-              </>
-            )}
-          </div>
-
-          <div className="flex items-center gap-1.5">
-            <span className="text-xs font-extrabold text-stone-100 tabular-nums w-8">
-              {rightVal}
-            </span>
-            <div className="w-16 h-1.5 bg-stone-800 rounded overflow-hidden flex justify-end">
-              <div
-                className="h-full bg-red-500 transition-all duration-200"
-                style={{ width: `${rebelPct}%` }}
-              />
+              </div>
             </div>
-            <span className="text-[10px] font-bold uppercase tracking-wider text-red-400">
-              Rebelles
-            </span>
           </div>
-        </div>
+        );
+      })()}
 
-        <div className="px-2.5 py-0.5 rounded bg-[#101713]/82 border border-stone-800 text-[10px] font-bold uppercase tracking-widest text-stone-300">
-          {hud.combatModeName} · {hud.totalZonesCount} Zones
-        </div>
+      {/* Virtual Touch Controls — Displayed ONLY on phones when controller is disconnected */}
+      <TouchControls
+        hud={hud}
+        onMove={onTouchMove}
+        onLookDelta={onTouchLookDelta}
+        onFire={onTouchFire}
+        onAdsToggle={onTouchAds}
+        onAction={onTouchAction}
+      />
 
-        {hud.radioBanner && (
-          <div className="px-3 py-0.5 rounded bg-[#141d17]/95 border border-amber-600/60 text-[11px] font-semibold tracking-wide text-amber-200">
-            {hud.radioBanner}
-          </div>
-        )}
+      {/* Top Left: Ultra-Minimal Icon Controls Only (No cards, no minimap, no menus) */}
+      {!killcamActive && (
+        <div className="fixed top-2 left-2 sm:top-3 sm:left-3 flex items-center gap-1.5 z-20 pointer-events-auto">
+          {hud.isMobileDevice ? (
+            <>
+              <button
+                type="button"
+                onClick={() => onTouchAction('pause')}
+                title="Paramètres & Carte"
+                aria-label="Ouvrir les paramètres et la carte"
+                className="p-1.5 rounded-md bg-[#0b120e]/80 border border-stone-600/50 text-amber-300/95 active:scale-95 cursor-pointer"
+              >
+                <Pause className="w-4 h-4" />
+              </button>
+              <button
+                type="button"
+                onClick={onToggleFullscreen}
+                title={hud.isFullscreen ? 'Quitter plein écran' : 'Plein écran'}
+                aria-label="Basculer en plein écran"
+                className="p-1.5 rounded-md bg-[#0b120e]/80 border border-stone-600/50 text-sky-300/95 active:scale-95 cursor-pointer"
+              >
+                {hud.isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
+              </button>
+            </>
+          ) : (
+            <button
+              type="button"
+              onClick={onToggleMute}
+              title={muted ? 'Activer le son' : 'Couper le son'}
+              aria-label={muted ? 'Activer le son' : 'Couper le son'}
+              className="p-1.5 rounded bg-[#0b120e]/75 border border-stone-700/50 text-stone-200 hover:border-stone-500 cursor-pointer"
+            >
+              {muted ? <VolumeX className="w-3.5 h-3.5 text-red-400" /> : <Volume2 className="w-3.5 h-3.5 text-amber-400" />}
+            </button>
+          )}
         </div>
       )}
 
-      {/* Top Right Compact Kill Feed (max 3 entries) */}
+      {/* Top Center: Compact Score Strip + Tactical Compass Bar (Essential Points Only) */}
       {!killcamActive && (
-        <div className="fixed top-3 right-3 flex flex-col items-end gap-1">
+        <div className="fixed top-1.5 sm:top-2.5 left-1/2 -translate-x-1/2 flex flex-col items-center gap-1 w-max max-w-[94vw] pointer-events-none z-10">
+          {/* Ultra-compact Score / Timer Strip */}
+          <div className="flex items-center gap-1.5 sm:gap-2 px-2 py-0.5 rounded bg-[#0b120e]/80 border border-stone-700/55 text-[10px] tabular-nums">
+            <div className="flex items-center gap-1">
+              <span className="font-extrabold text-sky-400">A</span>
+              <div className="w-8 sm:w-12 h-1 bg-stone-800/90 rounded overflow-hidden">
+                <div className="h-full bg-sky-500 transition-all duration-200" style={{ width: `${armyPct}%` }} />
+              </div>
+              <span className="font-extrabold text-stone-100">{leftVal}</span>
+            </div>
+
+            <span className="px-1.5 border-x border-stone-700/60 font-bold text-stone-300">
+              {formatTimer(hud.matchTimeRemaining)}
+            </span>
+
+            <div className="flex items-center gap-1">
+              <span className="font-extrabold text-stone-100">{rightVal}</span>
+              <div className="w-8 sm:w-12 h-1 bg-stone-800/90 rounded overflow-hidden flex justify-end">
+                <div className="h-full bg-red-500 transition-all duration-200" style={{ width: `${rebelPct}%` }} />
+              </div>
+              <span className="font-extrabold text-red-400">R</span>
+            </div>
+          </div>
+
+          {/* Scrolling Compass Bar showing Cardinals, Sectors, Order Waypoint & Enemies */}
+          <CompassBar
+            playerX={hud.playerPosX}
+            playerZ={hud.playerPosZ}
+            playerYaw={hud.playerYaw}
+            headingDeg={hud.compassHeadingDeg}
+            sectors={hud.sectors}
+            orderMarkerPos={hud.orderMarkerPos}
+            units={hud.minimapUnits}
+            compact={hud.isPortrait || hud.isMobileDevice}
+          />
+
+          {hud.radioBanner && (
+            <div className="px-2.5 py-0.5 rounded bg-[#0b120e]/65 border border-amber-600/40 text-[10px] font-semibold tracking-wide text-amber-200 max-w-[84vw] truncate">
+              {hud.radioBanner}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Top Right Compact Kill Feed (Desktop md+ only — hidden on mobile/Android for clear view) */}
+      {!killcamActive && !hud.isMobileDevice && (
+        <div className="hidden md:flex fixed top-3 right-3 flex-col items-end gap-1">
           {hud.killFeed.slice(0, 3).map((item) => (
             <div
               key={item.id}
-              className="px-2 py-0.5 rounded bg-[#101713]/85 border border-stone-800 text-[10px] flex items-center gap-1.5"
+              className="px-2 py-0.5 rounded bg-[#0b120e]/60 border border-stone-800/60 text-[10px] flex items-center gap-1.5"
             >
               <span className={item.killerFaction === 'army' ? 'text-sky-400 font-semibold' : 'text-red-400 font-semibold'}>
                 {item.killerName}
@@ -463,31 +517,146 @@ export const TacticalHud: React.FC<TacticalHudProps> = ({
         </div>
       )}
 
+      {/* Recon Drone Cross-Com EO/Thicket-Spotting Visor */}
+      {hud.droneActive && hud.hp > 0 && !killcamActive && (
+        <div className="fixed inset-0 pointer-events-none flex items-center justify-center">
+          {/* Subtle Electro-Optical Frame Vignette */}
+          <div
+            className="fixed inset-0"
+            style={{
+              background:
+                'radial-gradient(circle at center, rgba(14, 116, 144, 0.05) 38%, rgba(4, 15, 22, 0.56) 100%)',
+            }}
+          />
+
+          {/* Top-under-compass Telemetry Bar */}
+          <div className="fixed top-16 sm:top-20 left-1/2 -translate-x-1/2 flex flex-wrap items-center justify-center gap-2 px-3 py-1 rounded bg-[#07151c]/88 border border-cyan-500/55 text-[10px] font-bold uppercase tracking-wider text-cyan-200 tabular-nums shadow-lg">
+            <span className="inline-flex items-center gap-1 text-cyan-300 font-black">
+              <Radar className="w-3.5 h-3.5 animate-pulse" />
+              DRONE RECON
+            </span>
+            <span className="text-stone-500">·</span>
+            <span className={hud.droneBattery <= 25 ? 'text-red-400 font-black' : 'text-emerald-300'}>
+              BAT {hud.droneBattery}%
+            </span>
+            <span className="text-stone-500">·</span>
+            <span>
+              {hud.droneRangeMeters}/{hud.droneMaxRange}m
+            </span>
+            <span className="text-stone-500">·</span>
+            <span>ALT {hud.droneAltitudeMeters}m</span>
+            {hud.droneMarkedCount > 0 && (
+              <>
+                <span className="text-stone-500">·</span>
+                <span className="text-orange-300 font-black">
+                  {hud.droneMarkedCount} MARQUÉ{hud.droneMarkedCount > 1 ? 'S' : ''}
+                </span>
+              </>
+            )}
+          </div>
+
+          {/* Optical Spotting Brackets */}
+          <div className="relative w-40 h-28 flex items-center justify-center">
+            <span className="absolute top-0 left-0 w-4 h-4 border-t-2 border-l-2 border-cyan-400/80" />
+            <span className="absolute top-0 right-0 w-4 h-4 border-t-2 border-r-2 border-cyan-400/80" />
+            <span className="absolute bottom-0 left-0 w-4 h-4 border-b-2 border-l-2 border-cyan-400/80" />
+            <span className="absolute bottom-0 right-0 w-4 h-4 border-b-2 border-r-2 border-cyan-400/80" />
+
+            <div
+              className={`w-3 h-3 rotate-45 border-2 transition-colors ${
+                hud.droneAimingEnemy
+                  ? 'border-orange-400 bg-orange-500/70 scale-125 shadow-[0_0_10px_rgba(249,115,22,0.95)]'
+                  : 'border-cyan-300/85 bg-transparent'
+              }`}
+            />
+          </div>
+
+          {/* Target Lock in Thicket + Action Prompt */}
+          {hud.droneAimingEnemy && hud.droneAimingEnemyDist !== null && (
+            <div className="absolute top-[calc(50%+36px)] flex flex-col items-center gap-1">
+              <div className="px-2.5 py-0.5 rounded bg-[#210d08]/92 border border-orange-500/80 text-[10px] font-black tracking-wider text-orange-300 tabular-nums shadow">
+                CIBLE FOURRÉ · {hud.droneAimingEnemyDist}m
+                {hud.droneAimingEnemyName ? ` · ${hud.droneAimingEnemyName}` : ''}
+              </div>
+              {!hud.isMobileDevice && (
+                <div className="text-[9px] font-bold uppercase tracking-wider text-cyan-200 bg-[#07151c]/88 px-2 py-0.5 rounded border border-cyan-600/60">
+                  {hud.gamepadConnected
+                    ? '[R2 / □] Marquer · [D-Pad →] Ordre 1 Sub.'
+                    : '[Clic G / M] Marquer · [F / F2] Ordre 1 Sub.'}
+                </div>
+              )}
+            </div>
+          )}
+
+          {!hud.isMobileDevice && (
+            <div className="fixed bottom-14 left-1/2 -translate-x-1/2 px-3 py-1 rounded bg-[#07151c]/85 border border-cyan-700/55 text-[9.5px] font-semibold tracking-wide text-cyan-200">
+              {hud.gamepadConnected
+                ? 'Stick G Vol · Stick D Caméra · ✕/○ Altitude · R2 Marquer · D-Pad ↓ Maintenu / △ Rappeler'
+                : 'WASD/ZQSD Vol · Espace/C Altitude · Clic G / M Marquer · F/F2 Éliminer (1 sub.) · H/4/Clic D Rappeler'}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Center Reticle & Hitmarker */}
-      {hud.hp > 0 && !showSniperScope && (
+      {hud.hp > 0 && !showSniperScope && !hud.droneActive && (
         <div className="fixed inset-0 flex items-center justify-center">
           {!hud.isAds ? (
-            <div className="relative w-1 h-1">
+            <div className="relative w-1 h-1 flex items-center justify-center">
               <span
-                className="absolute left-1/2 -translate-x-1/2 w-[2px] h-2.5 bg-stone-100/90 shadow-[0_0_2px_rgba(0,0,0,0.9)]"
+                className={`absolute left-1/2 -translate-x-1/2 w-[2px] h-2.5 shadow-[0_0_2px_rgba(0,0,0,0.9)] ${
+                  hud.aimingAtEnemy ? 'bg-red-400/95' : 'bg-stone-100/90'
+                }`}
                 style={{ bottom: `${gap}px` }}
               />
               <span
-                className="absolute left-1/2 -translate-x-1/2 w-[2px] h-2.5 bg-stone-100/90 shadow-[0_0_2px_rgba(0,0,0,0.9)]"
+                className={`absolute left-1/2 -translate-x-1/2 w-[2px] h-2.5 shadow-[0_0_2px_rgba(0,0,0,0.9)] ${
+                  hud.aimingAtEnemy ? 'bg-red-400/95' : 'bg-stone-100/90'
+                }`}
                 style={{ top: `${gap}px` }}
               />
               <span
-                className="absolute top-1/2 -translate-y-1/2 h-[2px] w-2.5 bg-stone-100/90 shadow-[0_0_2px_rgba(0,0,0,0.9)]"
+                className={`absolute top-1/2 -translate-y-1/2 h-[2px] w-2.5 shadow-[0_0_2px_rgba(0,0,0,0.9)] ${
+                  hud.aimingAtEnemy ? 'bg-red-400/95' : 'bg-stone-100/90'
+                }`}
                 style={{ right: `${gap}px` }}
               />
               <span
-                className="absolute top-1/2 -translate-y-1/2 h-[2px] w-2.5 bg-stone-100/90 shadow-[0_0_2px_rgba(0,0,0,0.9)]"
+                className={`absolute top-1/2 -translate-y-1/2 h-[2px] w-2.5 shadow-[0_0_2px_rgba(0,0,0,0.9)] ${
+                  hud.aimingAtEnemy ? 'bg-red-400/95' : 'bg-stone-100/90'
+                }`}
                 style={{ left: `${gap}px` }}
               />
+              {hud.aimingAtEnemy && (
+                <span className="w-2 h-2 rounded-full bg-red-500 ring-1 ring-red-200/90 shadow-[0_0_8px_rgba(239,68,68,1)]" />
+              )}
             </div>
           ) : (
-            <div className="w-[3px] h-[3px] rounded-full bg-red-400/80 shadow-[0_0_3px_rgba(0,0,0,0.95)]" />
+            <div
+              className={
+                hud.aimingAtEnemy
+                  ? 'w-2 h-2 rounded-full bg-red-500 ring-2 ring-red-300/85 shadow-[0_0_9px_rgba(239,68,68,1)]'
+                  : 'w-[3px] h-[3px] rounded-full bg-stone-100/85 shadow-[0_0_3px_rgba(0,0,0,0.95)]'
+              }
+            />
           )}
+
+          {/* Compact Enemy Distance & Tom Clancy Single-Subordinate Lock Hint */}
+          {hud.aimingAtEnemy &&
+            !hud.aimingAtAlly &&
+            hud.friendlyFireWarnTimer <= 0 &&
+            hud.aimingEnemyDist !== null && (
+              <div className="absolute top-[calc(50%+20px)] flex flex-col items-center gap-0.5 pointer-events-none">
+                <div className="text-[9.5px] font-black tracking-wider text-red-400 drop-shadow-[0_1px_3px_rgba(0,0,0,0.95)] tabular-nums">
+                  {hud.aimingEnemyDist}m{hud.aimingEnemyName ? ` · ${hud.aimingEnemyName}` : ''}
+                </div>
+                {!hud.isMobileDevice && hud.subordinatesCount > 0 && (
+                  <div className="text-[8px] font-bold tracking-wider uppercase text-red-200/90 bg-red-950/70 px-1.5 py-0.5 rounded border border-red-500/40">
+                    {hud.gamepadConnected ? 'D-Pad → Éliminer (1 sub.)' : 'F / F2 Éliminer (1 sub.)'}
+                  </div>
+                )}
+              </div>
+            )}
 
           {hud.hitMarkerTimer > 0 && (
             <svg viewBox="0 0 32 32" className="absolute w-7 h-7">
@@ -556,8 +725,8 @@ export const TacticalHud: React.FC<TacticalHudProps> = ({
         </div>
       )}
 
-      {/* Pointer Lock Prompt (Hidden when DualShock controller is connected) */}
-      {!hud.pointerLocked && !hud.gamepadConnected && hud.hp > 0 && (
+      {/* Pointer Lock Prompt (Hidden when DualShock connected OR on Touch Phone) */}
+      {!hud.pointerLocked && !hud.gamepadConnected && !hud.isMobileDevice && hud.hp > 0 && (
         <div className="fixed inset-0 flex items-center justify-center pointer-events-auto">
           <button
             type="button"
@@ -654,325 +823,154 @@ export const TacticalHud: React.FC<TacticalHudProps> = ({
         </>
       )}
 
-      {/* Bottom Left: Slim Vitals Strip + Collapsible Mini-Fenêtre État */}
+      {/* Bottom Left: Ultra-Minimal Translucent HP & Stance Strip (Menus hidden on gameplay screen) */}
       {!killcamActive && (
-        <div className="fixed bottom-3 left-3 flex flex-col items-start gap-1.5">
-        {hud.inSmokeCover && hud.hp > 0 && (
-          <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-[#1d2220]/92 border border-stone-500/80 text-[10.5px] font-bold text-stone-200">
-            <CloudFog className="w-3.5 h-3.5 text-stone-300" />
-            <span>SOUS ÉCRAN FUMIGÈNE</span>
-          </div>
-        )}
+        <div className="fixed bottom-1.5 sm:bottom-2.5 left-2 sm:left-3 flex flex-col items-start gap-1 z-20 pointer-events-none">
+          {hud.inSmokeCover && hud.hp > 0 && (
+            <div className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-[#1d2220]/70 text-[9.5px] font-bold text-stone-200">
+              <CloudFog className="w-3 h-3 text-stone-300" />
+              <span>FUMIGÈNE</span>
+            </div>
+          )}
 
-        {hud.statusPanelOpen && (
-          <div className="w-[244px] px-3 py-2.5 rounded-lg bg-[#101713]/95 border border-stone-600/80 space-y-2 shadow-xl">
-            <div className="flex items-center justify-between text-[10px]">
-              <span className="inline-flex items-center gap-1 font-bold uppercase tracking-wider text-stone-300">
-                <Shield className="w-3 h-3 text-emerald-400" />
-                {hud.playerFaction === 'army' ? 'Armée Régulière' : 'Forces Rebelles'}
-              </span>
-              {hud.isRegenerating ? (
-                <span className="font-bold uppercase text-emerald-300">Régénération</span>
-              ) : hud.isWounded ? (
-                <span className="font-extrabold uppercase px-1.5 py-0.5 rounded bg-red-950 border border-red-600 text-red-300">
-                  Blessé · À couvert
+          {!hud.isMobileDevice && hud.statusPanelOpen && (
+            <div className="w-[228px] px-3 py-2 rounded-lg bg-[#101713]/85 border border-stone-700/70 space-y-1.5">
+              <div className="flex items-center justify-between text-[10px]">
+                <span className="inline-flex items-center gap-1 font-bold uppercase tracking-wider text-stone-300">
+                  <Shield className="w-3 h-3 text-emerald-400" />
+                  {hud.playerFaction === 'army' ? 'Armée Régulière' : 'Forces Rebelles'}
                 </span>
-              ) : (
-                <span className="font-semibold text-emerald-400">Opérationnel</span>
-              )}
-            </div>
-
-            <div className="flex items-center justify-between text-[11px] text-stone-300 py-1 px-2 rounded bg-stone-900/90 border border-stone-800">
-              <div className="inline-flex items-center gap-1.5">
-                <CloudFog className="w-3.5 h-3.5 text-stone-300" />
-                <span>Fumigène Tactique</span>
+                <span className="font-semibold text-emerald-400">
+                  {hud.isRegenerating ? 'Régénération' : hud.isWounded ? 'À couvert' : 'Opérationnel'}
+                </span>
               </div>
-              <span className="tabular-nums font-bold text-stone-200">
-                {hud.smokeGrenades} <span className="text-stone-500">[{hud.gamepadConnected ? 'L1' : 'E'}]</span>
-              </span>
-            </div>
-
-            <div className="flex items-center justify-between text-[10px] text-stone-300">
-              <div className="flex items-center gap-1.5">
+              <div className="flex items-center justify-between text-[10px] text-stone-300">
                 <span className="text-stone-400">ENDURANCE</span>
-                <div className="w-16 h-1.5 bg-stone-800 rounded overflow-hidden">
+                <div className="w-20 h-1.5 bg-stone-800 rounded overflow-hidden">
                   <div className="h-full bg-amber-400" style={{ width: `${hud.stamina}%` }} />
                 </div>
+                <span className="font-bold text-stone-200">{postureLabel}</span>
+              </div>
+            </div>
+          )}
+
+          <div className="w-[126px] sm:w-[168px] px-2 py-1 rounded bg-[#0a100c]/75 border border-stone-800/60">
+            <div className="flex items-baseline justify-between gap-1.5 mb-0.5 tabular-nums">
+              <div className="flex items-baseline gap-1">
+                <span className={`text-sm sm:text-base font-black leading-none ${hud.hp > 45 ? 'text-stone-100' : 'text-red-400'}`}>
+                  {hud.hp}
+                </span>
+                <span className="text-[9px] font-bold text-stone-400">PV</span>
               </div>
               <span
-                className={`font-bold ${
-                  hud.isSliding
-                    ? 'text-sky-300'
-                    : hud.isProne || hud.isDiving
-                    ? 'text-emerald-300'
-                    : hud.isCrouching || hud.isTacSprinting
-                    ? 'text-amber-300'
-                    : 'text-stone-200'
-                }`}
-              >
-                {postureLabel}
-              </span>
-            </div>
-
-            <div className="pt-1.5 border-t border-stone-800 text-[9.5px] text-stone-400 flex items-center justify-between">
-              {hud.gamepadConnected ? (
-                <>
-                  <span className="text-sky-300">L3 Sprint</span>
-                  <span className="text-sky-300">○ Accr./Glisse</span>
-                  <span className="text-sky-300">R3 Allongé</span>
-                </>
-              ) : (
-                <>
-                  <span>[Shift×2] Tac</span>
-                  <span>[C] Accroupi</span>
-                  <span>[X] Allongé</span>
-                </>
-              )}
-            </div>
-          </div>
-        )}
-
-        <div className="w-[236px] px-3 py-2 rounded-lg bg-[#101713]/88 border border-stone-700/75">
-          <div className="flex items-center justify-between gap-2 mb-1">
-            <div className="flex items-baseline gap-1 tabular-nums">
-              <HeartPulse
-                className={`w-3.5 h-3.5 self-center ${
-                  hud.isRegenerating
-                    ? 'text-emerald-400 animate-pulse'
-                    : hud.hp <= 45
-                    ? 'text-red-400 animate-pulse'
-                    : 'text-stone-400'
-                }`}
-              />
-              <span className={`text-lg font-black leading-none ${hud.hp > 45 ? 'text-stone-100' : 'text-red-400'}`}>
-                {hud.hp}
-              </span>
-              <span className="text-[10px] font-semibold text-stone-400">PV</span>
-              <span
-                className={`ml-1 text-[9px] font-bold uppercase ${
+                className={`text-[8.5px] font-bold uppercase ${
                   hud.isRegenerating
                     ? 'text-emerald-400'
                     : hud.isProne || hud.isDiving
                     ? 'text-emerald-300'
                     : hud.isCrouching || hud.isSliding
                     ? 'text-amber-300'
-                    : 'text-stone-400'
+                    : 'text-stone-300'
                 }`}
               >
                 {hud.isRegenerating ? 'Régén.' : postureLabel}
               </span>
             </div>
-
-            <div className="flex items-center gap-1.5">
-              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-stone-900 border border-stone-700 text-[10px] text-stone-200 tabular-nums">
-                <CloudFog className="w-2.5 h-2.5 text-stone-300" />
-                <strong className={hud.smokeGrenades > 0 ? 'text-stone-100' : 'text-stone-500'}>
-                  {hud.smokeGrenades}
-                </strong>
-                <span className="text-[9px] text-stone-400">{hud.gamepadConnected ? 'L1' : 'E'}</span>
-              </span>
-
-              <button
-                type="button"
-                onClick={onToggleStatusPanel}
-                aria-expanded={hud.statusPanelOpen}
-                aria-label="Ouvrir ou fermer la mini-fenêtre d'état"
-                title="Mini-fenêtre État (Clavier: I | DualShock: Select/Share)"
-                className="pointer-events-auto inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-stone-800 hover:bg-stone-700 border border-stone-500/80 text-[9.5px] font-bold text-amber-200 cursor-pointer"
-              >
-                <span>{hud.gamepadConnected ? 'Select' : 'I'}</span>
-                {hud.statusPanelOpen ? <ChevronDown className="w-3 h-3" /> : <ChevronUp className="w-3 h-3" />}
-              </button>
+            <div className="w-full h-1 bg-stone-800/85 rounded overflow-hidden">
+              <div
+                className={`h-full transition-all duration-150 ${hud.hp > 45 ? 'bg-emerald-500' : 'bg-red-500'}`}
+                style={{ width: `${Math.max(0, Math.min(100, (hud.hp / Math.max(1, hud.maxHp)) * 100))}%` }}
+              />
             </div>
           </div>
-
-          <div className="w-full h-1.5 bg-stone-800 rounded overflow-hidden">
-            <div
-              className={`h-full transition-all duration-150 ${
-                hud.hp > 45 ? 'bg-emerald-500' : 'bg-red-500'
-              }`}
-              style={{
-                width: `${Math.max(0, Math.min(100, (hud.hp / Math.max(1, hud.maxHp)) * 100))}%`,
-              }}
-            />
-          </div>
-        </div>
         </div>
       )}
 
-      {/* Bottom Right: Collapsible Mini-Fenêtre Grades & Ordres + Compact Weapon Card */}
+      {/* Bottom Right: Ultra-Minimal Translucent Weapon & Ammo Strip (Menus hidden on gameplay screen) */}
       {!killcamActive && (
-        <div className="fixed bottom-3 right-3 flex flex-col items-end gap-1.5">
-        {hud.commandPanelOpen && (
-          <div className="w-[264px] px-3 py-2.5 rounded-lg bg-[#101713]/95 border border-stone-600/80 shadow-xl">
-            <div className="flex items-center justify-between gap-2 mb-1">
-              <div className="inline-flex items-center gap-1">
-                <Award className="w-3.5 h-3.5 text-amber-400" />
-                <span className="text-[10.5px] font-extrabold uppercase tracking-wider text-amber-300">
+        <div className="fixed bottom-1.5 sm:bottom-2.5 right-2 sm:right-3 flex flex-col items-end gap-1 z-20 pointer-events-none">
+          {!hud.isMobileDevice && hud.commandPanelOpen && (
+            <div className="w-[248px] px-3 py-2 rounded-lg bg-[#101713]/85 border border-stone-700/70">
+              <div className="flex items-center justify-between gap-2 mb-1.5 text-[10px]">
+                <span className="inline-flex items-center gap-1 font-extrabold uppercase text-amber-300">
+                  <Award className="w-3 h-3 text-amber-400" />
                   Gr.{hud.rankLevel} · {hud.rankTitle}
                 </span>
-              </div>
-              <span className="text-[10px] font-bold text-sky-300 tabular-nums">
-                Sub. {hud.subordinatesCount}/{hud.totalAlliesCount}
-              </span>
-            </div>
-
-            <div className="flex items-center gap-2 mb-2">
-              <div className="flex-1 h-1.5 bg-stone-800 rounded overflow-hidden">
-                <div
-                  className="h-full bg-amber-400 transition-all duration-200"
-                  style={{
-                    width: `${
-                      hud.nextRankXp !== null
-                        ? Math.min(100, Math.round((hud.rankXp / Math.max(1, hud.nextRankXp)) * 100))
-                        : 100
-                    }%`,
-                  }}
-                />
-              </div>
-              <span className="text-[9.5px] text-stone-400 tabular-nums">
-                {hud.nextRankXp !== null ? `${hud.rankXp}/${hud.nextRankXp}` : 'MAX'}
-              </span>
-            </div>
-
-            <div className="flex items-center justify-between text-[9.5px] uppercase tracking-wider text-stone-400 mb-1">
-              <span className="inline-flex items-center gap-1 text-stone-300 font-semibold">
-                <Radio className="w-3 h-3 text-sky-400" />
-                Cross-Com
-              </span>
-              <span>{hud.gamepadConnected ? '[← Choix · → Ordre]' : '[T Choix · F Ordre]'}</span>
-            </div>
-
-            <div className="grid grid-cols-4 gap-1">
-              {TACTICAL_ORDERS.map((ord) => {
-                const isSelected = hud.selectedOrder === ord.id;
-                const isActive = hud.activeOrder === ord.id && hud.activeOrderTimer > 0;
-                return (
-                  <div
-                    key={ord.id}
-                    className={`px-1 py-1 rounded border text-center leading-tight ${
-                      isActive
-                        ? 'bg-sky-950/90 border-sky-400 text-sky-200'
-                        : isSelected
-                        ? 'bg-amber-950/80 border-amber-500/80 text-amber-200'
-                        : 'bg-stone-900/80 border-stone-800 text-stone-400'
-                    }`}
-                  >
-                    <div className="text-[8.5px] font-black">{ord.hotkey}</div>
-                    <div className="text-[8.5px] font-bold truncate">{ord.shortLabel}</div>
-                  </div>
-                );
-              })}
-            </div>
-
-            {hud.activeOrder && hud.activeOrderTimer > 0 && (
-              <div className="mt-1.5 text-[9.5px] font-semibold text-sky-300 flex items-center justify-between tabular-nums">
-                <span>
-                  Actif : {TACTICAL_ORDERS.find((o) => o.id === hud.activeOrder)?.shortLabel}
+                <span className="font-bold text-sky-300 tabular-nums">
+                  {hud.subordinatesCount}/{hud.totalAlliesCount}
                 </span>
-                <span>{Math.ceil(hud.activeOrderTimer)}s</span>
               </div>
-            )}
-          </div>
-        )}
-
-        <div className="w-[244px] px-3 py-2 rounded-lg bg-[#101713]/88 border border-stone-700/75">
-          <div className="flex items-center justify-between gap-2 pb-1.5 mb-1.5 border-b border-stone-800">
-            <div className="flex items-center gap-1.5 min-w-0">
-              <Award className="w-3 h-3 text-amber-400 shrink-0" />
-              <span className="text-[10px] font-bold text-amber-300 truncate">
-                {hud.rankAbbr} · {TACTICAL_ORDERS.find((o) => o.id === (hud.activeOrder ?? hud.selectedOrder))?.shortLabel}
-              </span>
-            </div>
-
-            <button
-              type="button"
-              onClick={onToggleCommandPanel}
-              aria-expanded={hud.commandPanelOpen}
-              aria-label="Ouvrir ou fermer la mini-fenêtre Grades et Ordres"
-              title="Mini-fenêtre Grades & Ordres (Clavier: Tab | DualShock: Pavé / Share long)"
-              className="pointer-events-auto inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-stone-800 hover:bg-stone-700 border border-stone-500/80 text-[9.5px] font-bold text-sky-200 cursor-pointer shrink-0"
-            >
-              <span>{hud.gamepadConnected ? 'Pavé' : 'Tab'}</span>
-              {hud.commandPanelOpen ? <ChevronDown className="w-3 h-3" /> : <ChevronUp className="w-3 h-3" />}
-            </button>
-          </div>
-
-          <div className="flex items-center justify-between gap-2 mb-0.5">
-            <span className="text-[11px] font-bold text-stone-200 tracking-wide truncate">
-              {hud.weaponName}
-            </span>
-            <div className="flex items-center gap-1 shrink-0">
-              {hud.sniperZoomLabel && (
-                <span className="text-[9px] font-bold px-1 py-0.5 rounded bg-sky-950 border border-sky-700 text-sky-300">
-                  {hud.sniperZoomLabel}
-                </span>
-              )}
-              <span className="text-[9px] font-bold px-1 py-0.5 rounded bg-stone-800 text-amber-300">
-                {hud.fireMode}
-              </span>
-            </div>
-          </div>
-
-          <div className="flex items-baseline justify-between">
-            <div className="tabular-nums">
-              <span
-                className={`text-xl font-black leading-none ${
-                  hud.ammoInMag <= 5 ? 'text-red-400' : 'text-stone-100'
-                }`}
-              >
-                {hud.ammoInMag}
-              </span>
-              <span className="text-xs text-stone-500 mx-1">/</span>
-              <span className="text-xs font-bold text-stone-400">{hud.ammoReserve}</span>
-            </div>
-            <div className="flex items-center gap-2 text-[10px] text-stone-300 tabular-nums">
-              <span>
-                FRAG [{hud.gamepadConnected ? 'R1' : 'G'}]:{' '}
-                <strong className="text-amber-300">{hud.grenades}</strong>
-              </span>
-              <span className="text-stone-600">·</span>
-              <span>
-                FUMI [{hud.gamepadConnected ? 'L1' : 'E'}]:{' '}
-                <strong className="text-stone-100">{hud.smokeGrenades}</strong>
-              </span>
-            </div>
-          </div>
-
-          {/* 3-Slot Equipped Loadout Strip */}
-          <div className="mt-1.5 pt-1.5 border-t border-stone-800/90 flex items-center justify-between gap-1">
-            <div className="flex items-center gap-1 min-w-0 flex-1">
-              {hud.loadout.map((wid, idx) => {
-                const active = wid === hud.weaponId;
-                const wSpec = WEAPON_SPECS[wid];
-                return (
-                  <span
-                    key={wid}
-                    className={`px-1.5 py-0.5 rounded text-[9px] font-bold truncate border ${
-                      active
-                        ? 'bg-amber-600/20 border-amber-500 text-amber-200'
-                        : 'bg-stone-900/80 border-stone-800 text-stone-400'
-                    }`}
-                  >
-                    {idx + 1}:{wSpec?.shortName ?? wid}
-                  </span>
-                );
-              })}
-            </div>
-            <span className="text-[8.5px] font-bold text-stone-400 shrink-0">[B] Armes</span>
-          </div>
-
-          {hud.isReloading && (
-            <div className="mt-1.5">
-              <div className="w-full h-1 bg-stone-800 rounded overflow-hidden">
-                <div
-                  className="h-full bg-amber-400"
-                  style={{ width: `${Math.round(hud.reloadProgress * 100)}%` }}
-                />
+              <div className="grid grid-cols-4 gap-1">
+                {TACTICAL_ORDERS.map((ord) => {
+                  const isSelected = hud.selectedOrder === ord.id;
+                  const isActive = hud.activeOrder === ord.id && hud.activeOrderTimer > 0;
+                  return (
+                    <div
+                      key={ord.id}
+                      className={`px-1 py-1 rounded border text-center leading-tight ${
+                        isActive
+                          ? 'bg-sky-950/90 border-sky-400 text-sky-200'
+                          : isSelected
+                          ? 'bg-amber-950/80 border-amber-500/80 text-amber-200'
+                          : 'bg-stone-900/80 border-stone-800 text-stone-400'
+                      }`}
+                    >
+                      <div className="text-[8px] font-black">{ord.hotkey}</div>
+                      <div className="text-[8px] font-bold truncate">{ord.shortLabel}</div>
+                    </div>
+                  );
+                })}
               </div>
             </div>
           )}
-        </div>
+
+          <div className="w-[146px] sm:w-[196px] px-2 py-1 rounded bg-[#0a100c]/75 border border-stone-800/60">
+            <div className="flex items-center justify-between gap-1.5">
+              <span className="text-[9.5px] sm:text-[10.5px] font-bold text-stone-200 truncate">
+                {WEAPON_SPECS[hud.weaponId]?.shortName ?? hud.weaponName}
+              </span>
+              <div className="flex items-center gap-1 shrink-0 tabular-nums">
+                {hud.sniperZoomLabel && (
+                  <span className="text-[8px] font-bold px-1 rounded bg-sky-950/80 text-sky-300">
+                    {hud.sniperZoomLabel}
+                  </span>
+                )}
+                <span
+                  className={`text-sm sm:text-base font-black leading-none ${
+                    hud.ammoInMag <= 5 ? 'text-red-400' : 'text-stone-100'
+                  }`}
+                >
+                  {hud.ammoInMag}
+                </span>
+                <span className="text-[10px] text-stone-400">/{hud.ammoReserve}</span>
+              </div>
+            </div>
+
+            {!hud.isMobileDevice && (
+              <div className="mt-0.5 flex items-center justify-between text-[9px] text-stone-400 tabular-nums">
+                <span className="inline-flex items-center gap-1 truncate max-w-[105px]">
+                  <Radio className="w-2.5 h-2.5 text-sky-400 shrink-0" />
+                  {hud.activeEliminateTargetName
+                    ? `1▸ ${hud.activeEliminateTargetName}`
+                    : TACTICAL_ORDERS.find((o) => o.id === (hud.activeOrder ?? hud.selectedOrder))?.shortLabel}
+                </span>
+                <span className="inline-flex items-center gap-1.5">
+                  <span className={hud.droneBattery >= 18 ? 'text-cyan-300 font-bold' : 'text-stone-500'}>
+                    DRN {hud.droneBattery}%[H]
+                  </span>
+                  <span>
+                    G:{hud.grenades}·F:{hud.smokeGrenades}
+                  </span>
+                </span>
+              </div>
+            )}
+
+            {hud.isReloading && (
+              <div className="mt-0.5 w-full h-0.5 bg-stone-800 rounded overflow-hidden">
+                <div className="h-full bg-amber-400" style={{ width: `${Math.round(hud.reloadProgress * 100)}%` }} />
+              </div>
+            )}
+          </div>
         </div>
       )}
     </div>
