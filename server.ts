@@ -14,6 +14,7 @@ type WeatherType = 'clear' | 'mist' | 'rain' | 'storm';
 const MAX_WS_PAYLOAD_BYTES = 16 * 1024;
 const MAX_MESSAGES_PER_SECOND = 120;
 const MAX_WORLD_COORDINATE = 10000;
+const MAX_HIT_DISTANCE = 60;
 const MAX_ROOM_PLAYERS = 16;
 const MAX_CONNECTIONS_PER_IP = 8;
 const MIN_JOIN_INTERVAL_MS = 1000;
@@ -795,8 +796,10 @@ async function startServer() {
         // Transitional validation: final authority must move to server-side world raycasts.
         const targetId = typeof msg.targetId === 'string' ? msg.targetId : '';
         const dmg = isFiniteNumber(msg.damage) ? Math.max(0, Math.min(100, msg.damage)) : 0;
-        const isHeadshot = Boolean(msg.isHeadshot);
-        const weaponLabel = String(msg.weaponLabel || 'Tir').slice(0, 24);
+        if (typeof msg.isHeadshot !== 'boolean') return;
+        if (typeof msg.weaponLabel !== 'string' || msg.weaponLabel.length > 48) return;
+        const isHeadshot = msg.isHeadshot;
+        const weaponLabel = msg.weaponLabel || 'Tir';
         const target = currentRoom.players.get(targetId);
         const now = Date.now();
         const lastHitAt = lastHitAtByTarget.get(targetId) || 0;
@@ -810,7 +813,7 @@ async function startServer() {
           target.faction === sender.faction ||
           dmg <= 0 ||
           now - lastHitAt < 100 ||
-          distance > 250
+          distance > MAX_HIT_DISTANCE
         ) return;
 
         lastHitAtByTarget.set(targetId, now);
