@@ -882,6 +882,7 @@ async function startServer() {
           : Infinity;
         if (
           !sender.alive ||
+          !canAct('hit', 50) ||
           !target ||
           !target.alive ||
           target.faction === sender.faction ||
