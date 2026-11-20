@@ -502,6 +502,11 @@ async function startServer() {
     const clientSeq = nextClientSeq++;
     const clientId = `p_${Date.now().toString(36)}_${clientSeq}`;
     const clientIp = normalizeRemoteIp(req.socket.remoteAddress);
+    const existingConnectionsFromIp = Array.from(allClients.values()).filter((client) => client.ip === clientIp).length;
+    if (existingConnectionsFromIp >= MAX_CONNECTIONS_PER_IP) {
+      ws.close(1008, 'Connection limit exceeded');
+      return;
+    }
     let currentRoom: LanRoom | null = null;
     let messageWindowStartedAt = Date.now();
     let messageCountInWindow = 0;
@@ -608,11 +613,6 @@ async function startServer() {
       if (type === 'room:join') {
         if (Date.now() - lastJoinAt < MIN_JOIN_INTERVAL_MS) {
           sendSelf({ type: 'network:error', code: 'JOIN_RATE_LIMIT', message: 'Réessayez dans un instant.' });
-          return;
-        }
-        const activeConnectionsFromIp = Array.from(allClients.values()).filter((client) => client.ip === clientIp).length;
-        if (activeConnectionsFromIp > MAX_CONNECTIONS_PER_IP) {
-          sendSelf({ type: 'network:error', code: 'IP_CONNECTION_LIMIT', message: 'Trop de connexions depuis cette adresse.' });
           return;
         }
         lastJoinAt = Date.now();
