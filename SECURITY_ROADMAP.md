@@ -19,6 +19,7 @@ This roadmap tracks the hardening work for the Kivu LAN multiplayer server.
 - Bound JSON request bodies, add baseline HTTP security headers, and expose a lightweight health endpoint.
 - Handle WebSocket server/client transport errors explicitly and log them without leaving unhandled error events.
 - Throttle lobby-presence updates and LAN discovery scans to prevent probe/broadcast flooding.
+- Restrict tactical-order identifiers to the supported command set and apply a global per-player hit-claim rate limit.
 
 ## Remaining work (required before public competitive multiplayer)
 
