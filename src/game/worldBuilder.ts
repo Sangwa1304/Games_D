@@ -601,7 +601,7 @@ function buildCentralTimberBridge(
   const halfWidth = 2.25;
 
   const timberMat = new THREE.MeshStandardMaterial({ map: tex.woodPlank, roughness: 0.88, metalness: 0.04 });
-  const barkMat = new THREE.MeshStandardMaterial({ map: tex.barkAlbedo, bumpMap: tex.barkBump, bumpScale: 0.08, roughness: 0.92 });
+  const barkMat = new THREE.MeshStandardMaterial({ map: tex.barkAlbedo, bumpMap: tex.barkBump, roughnessMap: tex.barkBump, bumpScale: 0.08, roughness: 0.92 });
   const ropeMat = new THREE.MeshStandardMaterial({ color: '#8f7752', roughness: 0.95 });
 
   const pilingGeo = new THREE.CylinderGeometry(0.19, 0.24, 4.2, 8);
