@@ -454,6 +454,9 @@ async function startServer() {
 
   const server = http.createServer(app);
   const wss = new WebSocketServer({ server, path: '/ws', maxPayload: MAX_WS_PAYLOAD_BYTES });
+  wss.on('error', (err) => {
+    console.error('WebSocket server error:', err.message);
+  });
 
   // UDP Broadcast + Multicast LAN Auto-Discovery Socket
   const udpSocket = dgram.createSocket({ type: 'udp4', reuseAddr: true });
@@ -952,6 +955,10 @@ async function startServer() {
           clientId
         );
       }
+    });
+
+    ws.on('error', (err) => {
+      console.warn(`WebSocket client error (${clientId}):`, err.message);
     });
 
     ws.on('close', () => {
