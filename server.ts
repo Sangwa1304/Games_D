@@ -10,6 +10,24 @@ import { WebSocketServer, WebSocket } from 'ws';
 type Faction = 'army' | 'rebels';
 type WeaponId = string;
 type WeatherType = 'clear' | 'mist' | 'rain' | 'storm';
+
+const MAX_WS_PAYLOAD_BYTES = 16 * 1024;
+const MAX_MESSAGES_PER_SECOND = 120;
+const MAX_WORLD_COORDINATE = 10000;
+const RESPAWN_DELAY_MS = 3000;
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+function isValidPlayerState(msg: Record<string, unknown>): boolean {
+  const coordinates = ['x', 'y', 'z'] as const;
+  const motion = ['yaw', 'pitch', 'vx', 'vz'] as const;
+  return (
+    coordinates.every((key) => isFiniteNumber(msg[key]) && Math.abs(msg[key] as number) <= MAX_WORLD_COORDINATE) &&
+    motion.every((key) => isFiniteNumber(msg[key]) && Math.abs(msg[key] as number) <= 1000)
+  );
+}
 type CombatModeId = 'conquest' | 'domination' | 'tdm' | 'assault' | 'cqc' | 'sniper';
 
 const VALID_MODES: CombatModeId[] = ['conquest', 'domination', 'tdm', 'assault', 'cqc', 'sniper'];
@@ -43,6 +61,7 @@ interface RoomPlayer {
   weaponId: WeaponId;
   hp: number;
   alive: boolean;
+  deathAt: number | null;
   isCrouching: boolean;
   isProne: boolean;
   isSprinting: boolean;
@@ -327,7 +346,7 @@ async function startServer() {
   });
 
   const server = http.createServer(app);
-  const wss = new WebSocketServer({ server, path: '/ws' });
+  const wss = new WebSocketServer({ server, path: '/ws', maxPayload: MAX_WS_PAYLOAD_BYTES });
 
   // UDP Broadcast + Multicast LAN Auto-Discovery Socket
   const udpSocket = dgram.createSocket({ type: 'udp4', reuseAddr: true });
@@ -448,6 +467,8 @@ async function startServer() {
     const clientId = `p_${Date.now().toString(36)}_${clientSeq}`;
     const clientIp = normalizeRemoteIp(req.socket.remoteAddress);
     let currentRoom: LanRoom | null = null;
+    let messageWindowStartedAt = Date.now();
+    let messageCountInWindow = 0;
 
     const lobbyClient: LobbyClient = {
       id: clientId,
@@ -495,6 +516,17 @@ async function startServer() {
     pushDiscoveryToAllClients();
 
     ws.on('message', (raw) => {
+      const now = Date.now();
+      if (now - messageWindowStartedAt >= 1000) {
+        messageWindowStartedAt = now;
+        messageCountInWindow = 0;
+      }
+      messageCountInWindow += 1;
+      if (messageCountInWindow > MAX_MESSAGES_PER_SECOND) {
+        ws.close(1008, 'Rate limit exceeded');
+        return;
+      }
+
       let msg: Record<string, unknown>;
       try {
         msg = JSON.parse(String(raw)) as Record<string, unknown>;
@@ -563,6 +595,7 @@ async function startServer() {
           weaponId: faction === 'army' ? 'carbine' : 'ak47',
           hp: 100,
           alive: true,
+          deathAt: null,
           isCrouching: false,
           isProne: false,
           isSprinting: false,
@@ -607,15 +640,17 @@ async function startServer() {
       sender.lastSeen = Date.now();
 
       if (type === 'player:state') {
-        sender.x = Number(msg.x) || 0;
-        sender.y = Number(msg.y) || 0;
-        sender.z = Number(msg.z) || 0;
-        sender.yaw = Number(msg.yaw) || 0;
-        sender.pitch = Number(msg.pitch) || 0;
-        sender.vx = Number(msg.vx) || 0;
-        sender.vz = Number(msg.vz) || 0;
-        sender.weaponId = (msg.weaponId as WeaponId) || sender.weaponId;
-        sender.faction = msg.faction === 'rebels' ? 'rebels' : 'army';
+        if (!isValidPlayerState(msg)) return;
+        sender.x = msg.x as number;
+        sender.y = msg.y as number;
+        sender.z = msg.z as number;
+        sender.yaw = msg.yaw as number;
+        sender.pitch = msg.pitch as number;
+        sender.vx = msg.vx as number;
+        sender.vz = msg.vz as number;
+        if (typeof msg.weaponId === 'string' && msg.weaponId.length <= 40) {
+          sender.weaponId = msg.weaponId;
+        }
         sender.rankLevel = Math.max(1, Math.min(7, Number(msg.rankLevel) || sender.rankLevel));
         sender.isCrouching = Boolean(msg.isCrouching);
         sender.isProne = Boolean(msg.isProne);
@@ -623,19 +658,16 @@ async function startServer() {
         sender.isTacSprinting = Boolean(msg.isTacSprinting);
         sender.isSliding = Boolean(msg.isSliding);
         sender.isDiving = Boolean(msg.isDiving);
-        if (typeof msg.hp === 'number') {
-          sender.hp = Math.max(0, Math.min(100, msg.hp));
-          sender.alive = sender.hp > 0;
-        }
         return;
       }
 
       if (type === 'player:respawn') {
+        if (sender.alive || sender.deathAt === null || Date.now() - sender.deathAt < RESPAWN_DELAY_MS) {
+          return;
+        }
         sender.hp = 100;
         sender.alive = true;
-        if (msg.faction === 'army' || msg.faction === 'rebels') {
-          sender.faction = msg.faction;
-        }
+        sender.deathAt = null;
         broadcastRoom(
           currentRoom,
           { type: 'player:respawned', id: clientId, faction: sender.faction },
@@ -678,11 +710,11 @@ async function startServer() {
 
       if (type === 'player:hit') {
         const targetId = String(msg.targetId || '');
-        const dmg = Math.max(0, Math.min(200, Number(msg.damage) || 0));
+        const dmg = isFiniteNumber(msg.damage) ? Math.max(0, Math.min(100, msg.damage)) : 0;
         const isHeadshot = Boolean(msg.isHeadshot);
         const weaponLabel = String(msg.weaponLabel || 'Tir').slice(0, 24);
         const target = currentRoom.players.get(targetId);
-        if (!target || !target.alive || target.faction === sender.faction) return;
+        if (!sender.alive || !target || !target.alive || target.faction === sender.faction || dmg <= 0) return;
 
         target.hp = Math.max(0, target.hp - dmg);
         const targetSocket = currentRoom.sockets.get(targetId);
@@ -703,6 +735,7 @@ async function startServer() {
 
         if (target.hp <= 0) {
           target.alive = false;
+          target.deathAt = Date.now();
           target.deaths++;
           sender.kills++;
           if (target.faction === 'army') {
