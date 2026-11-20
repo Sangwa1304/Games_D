@@ -359,7 +359,18 @@ function pushDiscoveryToAllClients() {
 
 async function startServer() {
   const app = express();
-  app.use(express.json());
+  app.disable('x-powered-by');
+  app.use(express.json({ limit: '16kb', strict: true }));
+  app.use((_req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('X-Frame-Options', 'DENY');
+    next();
+  });
+
+  app.get('/api/health', (_req, res) => {
+    res.json({ status: 'ok', rooms: rooms.size, clients: allClients.size, udpDiscoveryActive });
+  });
 
   app.get('/api/lan-info', (_req, res) => {
     res.json(getCombinedDiscovery());
