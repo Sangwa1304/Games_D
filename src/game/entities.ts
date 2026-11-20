@@ -30,7 +30,7 @@ import {
   WeaponId,
 } from './types';
 import { WEAPON_SPECS, isFlameWeapon, isRocketWeapon, isSniperWeapon } from './weapons';
-import { getClassWeapon, getSoldierClass, SoldierClassId } from './soldierClasses';
+import { getClassWeapon, getSoldierClass, SOLDIER_CLASSES, SoldierClassId } from './soldierClasses';
 
 export interface RemoteCombatTarget {
   key: string;
@@ -2182,7 +2182,7 @@ export function updateSoldierAI(
   s.root.rotation.y = s.yaw;
 
   // Class-specific movement profile, followed by injury and terrain penalties.
-  moveSpeed *= s.soldierClass === 'assault' ? 1.08 : s.soldierClass === 'support' ? 0.88 : s.soldierClass === 'marksman' ? 0.92 : s.soldierClass === 'antiArmor' ? 0.9 : 1;
+  moveSpeed *= SOLDIER_CLASSES[s.soldierClass].movementMultiplier;
 
   // Injury speed reduction (limping soldier moves slower)
   const isInjured = s.hp < 55;
