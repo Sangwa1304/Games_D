@@ -59,8 +59,10 @@ test('player snapshots accept the expected typed client state', () => {
 test('player snapshots reject invalid posture types and rank values', () => {
   const invalidFlag = { ...validPlayerState(), isProne: 'false' };
   const invalidRank = { ...validPlayerState(), rankLevel: 99 };
+  const fractionalRank = { ...validPlayerState(), rankLevel: 3.5 };
   assert.equal(isValidPlayerState(invalidFlag), false);
   assert.equal(isValidPlayerState(invalidRank), false);
+  assert.equal(isValidPlayerState(fractionalRank), false);
 });
 
 test('player snapshots reject unknown weapon identifiers and non-finite motion', () => {
