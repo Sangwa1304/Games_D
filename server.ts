@@ -68,6 +68,56 @@ function sanitizeCombatMode(raw: unknown): CombatModeId {
 }
 
 const WEATHER_LIST: WeatherType[] = ['clear', 'mist', 'rain', 'storm'];
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function boundedCount(value: unknown, max: number): number {
+  return isFiniteNumber(value) ? Math.max(0, Math.min(max, Math.floor(value))) : 0;
+}
+
+function sanitizeDiscoveredRooms(raw: unknown, hostIp: string, port: number): RoomSummaryPayload[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.slice(0, 32).flatMap((item): RoomSummaryPayload[] => {
+    if (!isRecord(item) || typeof item.code !== 'string' || !/^[A-Z0-9-]{1,12}$/i.test(item.code)) return [];
+    const weather = WEATHER_LIST.includes(item.weather as WeatherType) ? item.weather as WeatherType : 'clear';
+    const playerNames = Array.isArray(item.playerNames)
+      ? item.playerNames.filter((name): name is string => typeof name === 'string').slice(0, MAX_ROOM_PLAYERS).map((name) => name.slice(0, 18))
+      : [];
+    return [{
+      code: item.code.toUpperCase(),
+      hostName: typeof item.hostName === 'string' ? item.hostName.slice(0, 32) : 'Hôte LAN',
+      playerCount: boundedCount(item.playerCount, MAX_ROOM_PLAYERS),
+      armyCount: boundedCount(item.armyCount, MAX_ROOM_PLAYERS),
+      rebelCount: boundedCount(item.rebelCount, MAX_ROOM_PLAYERS),
+      weather,
+      combatMode: sanitizeCombatMode(item.combatMode),
+      hostIp,
+      port,
+      isRemoteHost: true,
+      playerNames,
+    }];
+  });
+}
+
+function sanitizeDiscoveredPeers(raw: unknown, hostIp: string, port: number): PeerPlayerPayload[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.slice(0, 64).flatMap((item): PeerPlayerPayload[] => {
+    if (!isRecord(item) || typeof item.id !== 'string' || item.id.length < 1 || item.id.length > 64) return [];
+    return [{
+      id: item.id,
+      name: typeof item.name === 'string' ? item.name.slice(0, 18) : 'Soldat',
+      faction: item.faction === 'rebels' ? 'rebels' : 'army',
+      ip: hostIp,
+      status: item.status === 'playing' ? 'playing' : 'lobby',
+      roomCode: typeof item.roomCode === 'string' ? item.roomCode.slice(0, 12) : null,
+      hostIp,
+      port,
+      isRemoteHost: true,
+    }];
+  });
+}
+
 const UDP_DISCOVERY_PORT = Number(process.env.KIVU_UDP_PORT || 41234);
 const UDP_MULTICAST_GROUP = '239.255.77.88';
 const DISCOVERY_MAGIC = 'KIVU_LAN_V1';
@@ -429,21 +479,23 @@ async function startServer() {
 
   udpSocket.on('message', (buf, rinfo) => {
     try {
-      const msg = JSON.parse(buf.toString('utf8')) as {
-        magic?: string;
-        kind?: 'beacon' | 'probe';
-        instanceId?: string;
-        port?: number;
-        primaryIp?: string;
-        hostLabel?: string;
-        rooms?: RoomSummaryPayload[];
-        peers?: PeerPlayerPayload[];
-      };
-      if (msg.magic !== DISCOVERY_MAGIC || !msg.instanceId || msg.instanceId === INSTANCE_ID) {
-        return;
-      }
+      if (buf.length > 8192) return;
+      const parsed: unknown = JSON.parse(buf.toString('utf8'));
+      if (!isRecord(parsed)) return;
+      const msg = parsed;
+      if (
+        msg.magic !== DISCOVERY_MAGIC ||
+        typeof msg.instanceId !== 'string' ||
+        !/^[a-zA-Z0-9_-]{1,64}$/.test(msg.instanceId) ||
+        msg.instanceId === INSTANCE_ID ||
+        (msg.kind !== 'beacon' && msg.kind !== 'probe') ||
+        !isFiniteNumber(msg.port) ||
+        !Number.isInteger(msg.port) ||
+        msg.port < 1 ||
+        msg.port > 65535
+      ) return;
 
-      const senderIp = normalizeRemoteIp(rinfo.address) || msg.primaryIp || '127.0.0.1';
+      const senderIp = normalizeRemoteIp(rinfo.address);
       if (msg.kind === 'probe') {
         sendUdpPacket('beacon', senderIp);
       }
@@ -452,10 +504,10 @@ async function startServer() {
       const nextHost: DiscoveredUdpHost = {
         instanceId: msg.instanceId,
         ip: senderIp,
-        port: Number(msg.port) || 3000,
-        hostLabel: String(msg.hostLabel || senderIp),
-        rooms: Array.isArray(msg.rooms) ? msg.rooms : [],
-        peers: Array.isArray(msg.peers) ? msg.peers : [],
+        port: msg.port,
+        hostLabel: typeof msg.hostLabel === 'string' ? msg.hostLabel.slice(0, 64) : senderIp,
+        rooms: sanitizeDiscoveredRooms(msg.rooms, senderIp, msg.port),
+        peers: sanitizeDiscoveredPeers(msg.peers, senderIp, msg.port),
         lastSeen: Date.now(),
       };
       const prevSig = prev ? JSON.stringify({ r: prev.rooms, p: prev.peers }) : '';
