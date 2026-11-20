@@ -2107,12 +2107,15 @@ export function updateSoldierAI(
       const wSpec = WEAPON_SPECS[s.weaponId];
       const rpm = wSpec?.rpm ?? 650;
       const isSuppressWeapon = !isFlm && rpm >= 880;
+      const isSupport = s.soldierClass === 'support';
       if (s.burstRemaining <= 0) {
         s.burstRemaining =
           isSnp || isRkt
             ? 1
             : isFlm
             ? 10
+            : isSupport
+            ? 8 + Math.floor(Math.random() * 5)
             : isElimOrder
             ? isSuppressWeapon
               ? 8
@@ -2129,7 +2132,8 @@ export function updateSoldierAI(
       }
       _aiAimDir.subVectors(bestEnemyPos, _aiMuzzle).normalize();
       const baseSpread = isSnp ? 0.018 : isRkt ? 0.036 : isFlm ? 0.072 : 0.048;
-      const spread = isElimOrder ? baseSpread * 0.62 : baseSpread;
+      const classSpread = s.soldierClass === 'marksman' ? baseSpread * 0.72 : baseSpread;
+      const spread = isElimOrder ? classSpread * 0.62 : classSpread;
       _aiAimDir.x += (Math.random() - 0.5) * spread;
       _aiAimDir.y += (Math.random() - 0.5) * spread * 0.68 + (isRkt ? 0.035 : 0);
       _aiAimDir.z += (Math.random() - 0.5) * spread;
@@ -2155,8 +2159,12 @@ export function updateSoldierAI(
             : 0.34
           : isFlm
           ? 0.42
+          : isSupport
+          ? 0.32 + Math.random() * 0.28
           : isSuppressWeapon
           ? 0.45 + Math.random() * 0.5
+          : s.soldierClass === 'assault'
+          ? 0.42 + Math.random() * 0.32
           : 0.62 + Math.random() * 0.78;
         if (onCallout && s.calloutCooldown <= 0 && Math.random() < 0.25) {
           onCallout(s, 'reload', false);
