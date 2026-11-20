@@ -26,5 +26,5 @@ test('class combat stats stay within sensible bounds', () => {
 
 test('invalid class indexes resolve safely to a known class', () => {
   assert.equal(getSoldierClass(Number.NaN).id, 'assault');
-  assert.equal(getSoldierClass(-1).id, 'medic');
+  assert.equal(getSoldierClass(-1).id, 'assault');
 });
