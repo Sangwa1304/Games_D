@@ -732,7 +732,8 @@ async function startServer() {
         ) return;
 
         lastHitAtByTarget.set(targetId, now);
-        target.hp = Math.max(0, target.hp - dmg);        const targetSocket = currentRoom.sockets.get(targetId);
+        target.hp = Math.max(0, target.hp - dmg);
+        const targetSocket = currentRoom.sockets.get(targetId);
         if (targetSocket && targetSocket.readyState === WebSocket.OPEN) {
           targetSocket.send(
             JSON.stringify({
