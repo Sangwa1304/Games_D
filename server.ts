@@ -17,6 +17,7 @@ const MAX_WORLD_COORDINATE = 10000;
 const MAX_HIT_DISTANCE = 60;
 const MAX_ROOM_PLAYERS = 16;
 const MAX_CONNECTIONS_PER_IP = 8;
+const MAX_DISCOVERED_UDP_HOSTS = 64;
 const MIN_JOIN_INTERVAL_MS = 1000;
 const RESPAWN_DELAY_MS = 3000;
 const VALID_WEAPONS = new Set([
@@ -276,6 +277,19 @@ function normalizeRemoteIp(raw: string | undefined): string {
   return raw.startsWith('::ffff:') ? raw.slice(7) : raw;
 }
 
+function isPrivateLanIpv4(ip: string): boolean {
+  const parts = ip.split('.').map(Number);
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return false;
+  const [a, b] = parts;
+  return (
+    a === 10 ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 169 && b === 254) ||
+    a === 127
+  );
+}
+
 function getPrimaryHostIp(): string {
   return getLocalWifiIps()[0] || '127.0.0.1';
 }
@@ -496,6 +510,8 @@ async function startServer() {
       ) return;
 
       const senderIp = normalizeRemoteIp(rinfo.address);
+      if (!isPrivateLanIpv4(senderIp)) return;
+      if (!discoveredUdpHosts.has(msg.instanceId) && discoveredUdpHosts.size >= MAX_DISCOVERED_UDP_HOSTS) return;
       if (msg.kind === 'probe') {
         sendUdpPacket('beacon', senderIp);
       }
