@@ -24,6 +24,7 @@ const VALID_WEAPONS = new Set([
   'ak47', 'carbine', 'ak74m', 'fnfal', 'scar_l', 'hk416', 'famas', 'aug', 'galil', 'sg552',
   'sniper', 'm24', 'awm', 'barrett', 'mk20', 'vss', 'bazooka', 'at4', 'flamethrower', 'lpo50',
 ]);
+const VALID_ORDERS = new Set(['assault', 'eliminate', 'cover', 'move', 'follow']);
 
 function isVector3(value: unknown): value is { x: number; y: number; z: number } {
   if (!value || typeof value !== 'object') return false;
@@ -941,7 +942,7 @@ async function startServer() {
           !sender.alive ||
           !canAct('order', 500) ||
           typeof msg.order !== 'string' ||
-          msg.order.length > 32 ||
+          !VALID_ORDERS.has(msg.order) ||
           !isVector3(msg.target)
         ) return;
         broadcastRoom(
