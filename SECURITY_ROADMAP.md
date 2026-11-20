@@ -20,6 +20,7 @@ This roadmap tracks the hardening work for the Kivu LAN multiplayer server.
 - Handle WebSocket server/client transport errors explicitly and log them without leaving unhandled error events.
 - Throttle lobby-presence updates and LAN discovery scans to prevent probe/broadcast flooding.
 - Restrict tactical-order identifiers to the supported command set and apply a global per-player hit-claim rate limit.
+- Extract packet-validation primitives into a pure module and cover malformed vectors, player snapshots, and direction vectors with automated unit tests.
 
 ## Remaining work (required before public competitive multiplayer)
 
@@ -28,7 +29,7 @@ This roadmap tracks the hardening work for the Kivu LAN multiplayer server.
 3. Complete discriminated schema validation for every WebSocket message, including lobby presence and room joins; reject unknown or malformed payloads.
 4. Add reconnect leases and cleanup/expiry for abandoned rooms.
 5. Add authenticated room ownership and signed/expiring join tokens for internet-facing deployments.
-6. Add integration tests for forged state, invalid payloads, respawn abuse, friendly fire, and combat rate limits.
+6. Expand automated coverage to full WebSocket integration tests for forged state, respawn abuse, friendly fire, room limits, and combat rate limits.
 7. Add observability for rejected packets, disconnect reasons, room lifecycle, and server tick health.
 
 ## Operational notes
