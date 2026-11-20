@@ -43,7 +43,7 @@ export function isValidPlayerState(msg: Record<string, unknown>): boolean {
     coordinates.every((key) => isFiniteNumber(msg[key]) && Math.abs(msg[key] as number) <= MAX_WORLD_COORDINATE) &&
     motion.every((key) => isFiniteNumber(msg[key]) && Math.abs(msg[key] as number) <= 1000) &&
     flags.every((key) => typeof msg[key] === 'boolean') &&
-    isFiniteNumber(msg.rankLevel) && msg.rankLevel >= 1 && msg.rankLevel <= 7 &&
+    isFiniteNumber(msg.rankLevel) && Number.isInteger(msg.rankLevel) && msg.rankLevel >= 1 && msg.rankLevel <= 7 &&
     typeof msg.weaponId === 'string' && VALID_WEAPONS.has(msg.weaponId)
   );
 }
