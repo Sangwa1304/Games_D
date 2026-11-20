@@ -14,13 +14,16 @@ This roadmap tracks the hardening work for the Kivu LAN multiplayer server.
 - Cap concurrent connections per source IP and validate weapon identifiers against the game's known weapon set.
 - Validate shot origins/directions, grenade position/velocity, and tactical-order payloads before relaying them.
 - Apply per-connection action cooldowns to shooting, grenades, and tactical orders.
+- Strictly type-check movement posture/rank/weapon fields and bound hit claims to a 60-unit combat envelope.
+- Validate and cap incoming UDP discovery beacons, including room/peer counts, names, identifiers, and ports; restrict discovery to private LAN peers and cap the discovered-host cache.
+- Bound JSON request bodies, add baseline HTTP security headers, and expose a lightweight health endpoint.
 
 ## Remaining work (required before public competitive multiplayer)
 
 1. Move hit registration to the server. The current client-reported hit protocol is only constrained, not authoritative; the server still cannot prove line of sight, weapon cadence, ammo, recoil, or collision.
 2. Simulate movement and collision on the server, with speed/acceleration envelopes and reconciliation.
 3. Complete discriminated schema validation for every WebSocket message, including lobby presence and room joins; reject unknown or malformed payloads.
-4. Add reconnect leases, per-IP connection limits at the transport edge, and cleanup/expiry for abandoned rooms.
+4. Add reconnect leases and cleanup/expiry for abandoned rooms.
 5. Add authenticated room ownership and signed/expiring join tokens for internet-facing deployments.
 6. Add integration tests for forged state, invalid payloads, respawn abuse, friendly fire, and combat rate limits.
 7. Add observability for rejected packets, disconnect reasons, room lifecycle, and server tick health.
