@@ -6,6 +6,7 @@ import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { WebSocketServer, WebSocket } from 'ws';
+import { distance3, isFiniteNumber, isValidDirection, isValidPlayerState, isVector3, VALID_WEAPONS } from './server/security';
 
 type Faction = 'army' | 'rebels';
 type WeaponId = string;
@@ -13,55 +14,14 @@ type WeatherType = 'clear' | 'mist' | 'rain' | 'storm';
 
 const MAX_WS_PAYLOAD_BYTES = 16 * 1024;
 const MAX_MESSAGES_PER_SECOND = 120;
-const MAX_WORLD_COORDINATE = 10000;
 const MAX_HIT_DISTANCE = 60;
 const MAX_ROOM_PLAYERS = 16;
 const MAX_CONNECTIONS_PER_IP = 8;
 const MAX_DISCOVERED_UDP_HOSTS = 64;
 const MIN_JOIN_INTERVAL_MS = 1000;
 const RESPAWN_DELAY_MS = 3000;
-const VALID_WEAPONS = new Set([
-  'ak47', 'carbine', 'ak74m', 'fnfal', 'scar_l', 'hk416', 'famas', 'aug', 'galil', 'sg552',
-  'sniper', 'm24', 'awm', 'barrett', 'mk20', 'vss', 'bazooka', 'at4', 'flamethrower', 'lpo50',
-]);
 const VALID_ORDERS = new Set(['assault', 'eliminate', 'cover', 'move', 'follow']);
 
-function isVector3(value: unknown): value is { x: number; y: number; z: number } {
-  if (!value || typeof value !== 'object') return false;
-  const vector = value as Record<string, unknown>;
-  return ['x', 'y', 'z'].every((key) =>
-    isFiniteNumber(vector[key]) && Math.abs(vector[key] as number) <= MAX_WORLD_COORDINATE
-  );
-}
-
-function isValidDirection(value: unknown): value is { x: number; y: number; z: number } {
-  if (!isVector3(value)) return false;
-  const length = Math.hypot(value.x, value.y, value.z);
-  return length >= 0.95 && length <= 1.05;
-}
-
-function distance3(a: { x: number; y: number; z: number }, b: { x: number; y: number; z: number }) {
-  return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
-}
-
-function isFiniteNumber(value: unknown): value is number {
-  return typeof value === 'number' && Number.isFinite(value);
-}
-
-function isValidPlayerState(msg: Record<string, unknown>): boolean {
-  const coordinates = ['x', 'y', 'z'] as const;
-  const motion = ['yaw', 'pitch', 'vx', 'vz'] as const;
-  const flags = [
-    'isCrouching', 'isProne', 'isSprinting', 'isTacSprinting', 'isSliding', 'isDiving',
-  ] as const;
-  return (
-    coordinates.every((key) => isFiniteNumber(msg[key]) && Math.abs(msg[key] as number) <= MAX_WORLD_COORDINATE) &&
-    motion.every((key) => isFiniteNumber(msg[key]) && Math.abs(msg[key] as number) <= 1000) &&
-    flags.every((key) => typeof msg[key] === 'boolean') &&
-    isFiniteNumber(msg.rankLevel) && msg.rankLevel >= 1 && msg.rankLevel <= 7 &&
-    typeof msg.weaponId === 'string' && VALID_WEAPONS.has(msg.weaponId)
-  );
-}
 type CombatModeId = 'conquest' | 'domination' | 'tdm' | 'assault' | 'cqc' | 'sniper';
 
 const VALID_MODES: CombatModeId[] = ['conquest', 'domination', 'tdm', 'assault', 'cqc', 'sniper'];
