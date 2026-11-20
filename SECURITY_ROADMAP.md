@@ -22,6 +22,12 @@ This roadmap tracks the hardening work for the Kivu LAN multiplayer server.
 - Restrict tactical-order identifiers to the supported command set and apply a global per-player hit-claim rate limit.
 - Extract packet-validation primitives into a pure module and cover malformed vectors, player snapshots, and direction vectors with automated unit tests.
 
+## Gameplay expansion delivered in this pass
+
+- Added five deterministic soldier specializations: assault, support, marksman, anti-armor, and combat medic.
+- Assigned faction-specific weapon pools and class-specific health, movement, and tactical roles.
+- Added autonomous medic field treatment: living medics periodically restore health to the nearest wounded ally within support range; they do not revive eliminated soldiers.
+
 ## Remaining work (required before public competitive multiplayer)
 
 1. Move hit registration to the server. The current client-reported hit protocol is only constrained, not authoritative; the server still cannot prove line of sight, weapon cadence, ammo, recoil, or collision.
@@ -43,6 +49,12 @@ The next phase should be implemented in this order to avoid breaking LAN compati
 5. **Authorize weapons and shots.** Store server-side loadouts, ammo, reload state, and weapon fire intervals. A fire request should contain intent only; the server derives the muzzle origin from the authoritative player pose and performs ray/capsule and line-of-sight tests.
 6. **Simulate explosives on the server.** Own grenade trajectories, fuse timing, blast radius, and damage server-side. Remove the client-reported `player:hit` path once equivalent authoritative explosion and flame damage exists.
 7. **Retire compatibility paths.** After supported clients have migrated, reject legacy `player:state` and `player:hit` messages rather than keeping two competing authorities.
+
+## Remaining gameplay expansion
+
+- Build a full solo campaign with authored missions, progression, and persistent save data.
+- Add extraction and escort modes with dedicated objective actors, extraction zones, timers, and victory conditions.
+- Expand class-specific squad formations, suppression visual feedback, and sourced realistic audio/photogrammetry assets.
 
 ## Operational notes
 
