@@ -1383,6 +1383,27 @@ export function updateSoldierAI(
   if (s.diveCooldown > 0) s.diveCooldown -= dt;
   if (s.calloutCooldown > 0) s.calloutCooldown -= dt;
   if (s.commandCooldown > 0) s.commandCooldown -= dt;
+  if (s.soldierClass === 'medic') {
+    s.medicCooldown = Math.max(0, s.medicCooldown - dt);
+    if (s.medicCooldown <= 0) {
+      let patient: SoldierEntity | null = null;
+      let patientDistSq = 18 * 18;
+      for (const ally of allSoldiers) {
+        if (ally === s || !ally.alive || ally.faction !== s.faction || ally.hp >= ally.maxHp) continue;
+        const distSq = ally.position.distanceToSquared(s.position);
+        if (distSq < patientDistSq) {
+          patient = ally;
+          patientDistSq = distSq;
+        }
+      }
+      if (patient) {
+        patient.hp = Math.min(patient.maxHp, patient.hp + 9);
+        s.medicCooldown = 5.5;
+      } else {
+        s.medicCooldown = 1.2;
+      }
+    }
+  }
   if (s.orderTimer > 0) {
     s.orderTimer -= dt;
     if (s.orderTimer <= 0 && s.tacticalOrder !== 'eliminate') {
@@ -2151,6 +2172,9 @@ export function updateSoldierAI(
   while (dYaw < -Math.PI) dYaw += Math.PI * 2;
   s.yaw += dYaw * Math.min(1, dt * (isProne ? 4.2 : 8.5));
   s.root.rotation.y = s.yaw;
+
+  // Class-specific movement profile, followed by injury and terrain penalties.
+  moveSpeed *= s.soldierClass === 'assault' ? 1.08 : s.soldierClass === 'support' ? 0.88 : s.soldierClass === 'marksman' ? 0.92 : s.soldierClass === 'antiArmor' ? 0.9 : 1;
 
   // Injury speed reduction (limping soldier moves slower)
   const isInjured = s.hp < 55;
