@@ -665,6 +665,7 @@ async function startServer() {
       const type = String(msg.type || '');
 
       if (type === 'lobby:presence') {
+        if (!canAct('presence', 250)) return;
         const nextName =
           typeof msg.name === 'string' && msg.name.trim().length > 0
             ? msg.name.trim().slice(0, 18)
@@ -680,6 +681,7 @@ async function startServer() {
       }
 
       if (type === 'rooms:list' || type === 'lan:scan') {
+        if (!canAct('discovery', 1000)) return;
         sendUdpPacket('probe');
         sendSelf({
           type: 'lan:discovery',
