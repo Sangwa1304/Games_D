@@ -346,6 +346,30 @@ export class TacticalAudioEngine {
     oGain.connect(this.sfxGain);
     osc.start(now);
     osc.stop(now + (isHeavy50 ? 0.24 : 0.13));
+
+    // Distant reports pick up a soft valley/forest reflection instead of
+    // sounding like a dry close-mic sample at every range.
+    if (distance > 18 && !isSuppressed) {
+      const reflection = this.ctx.createBufferSource();
+      reflection.buffer = this.noiseBuffer;
+      const delay = this.ctx.createDelay(0.5);
+      delay.delayTime.value = 0.11 + Math.min(0.2, distance / 900);
+      const lowpass = this.ctx.createBiquadFilter();
+      lowpass.type = 'lowpass';
+      lowpass.frequency.value = isHeavy50 ? 720 : isSniper ? 980 : 1180;
+      lowpass.Q.value = 0.45;
+      const echoGain = this.ctx.createGain();
+      const echoLevel = Math.max(0.025, Math.min(0.13, 0.13 / (1 + distance * 0.018)));
+      echoGain.gain.setValueAtTime(0.001, now);
+      echoGain.gain.setValueAtTime(echoLevel * atten, now + delay.delayTime.value);
+      echoGain.gain.exponentialRampToValueAtTime(0.001, now + delay.delayTime.value + 0.42);
+      reflection.connect(delay);
+      delay.connect(lowpass);
+      lowpass.connect(echoGain);
+      echoGain.connect(this.sfxGain);
+      reflection.start(now, Math.random() * 0.8, 0.46);
+      reflection.stop(now + 0.48);
+    }
   }
 
   public playFlamethrowerBurst(distance = 0) {

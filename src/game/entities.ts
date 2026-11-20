@@ -30,6 +30,7 @@ import {
   WeaponId,
 } from './types';
 import { WEAPON_SPECS, isFlameWeapon, isRocketWeapon, isSniperWeapon } from './weapons';
+import { getClassWeapon, getSoldierClass, SOLDIER_CLASSES, SoldierClassId } from './soldierClasses';
 
 export interface RemoteCombatTarget {
   key: string;
@@ -82,6 +83,8 @@ export interface SoldierEntity {
   assignedCoverIdx: number;
   coverStance: 'crouch' | 'prone';
   tacticalRole: 'rifleman' | 'defender' | 'flanker';
+  soldierClass: SoldierClassId;
+  medicCooldown: number;
   flankSign: 1 | -1;
   diveTimer: number;
   proneTimer: number;
@@ -962,11 +965,8 @@ export function spawnSoldier(
   const rankDef = getRankDef(faction, rankLevel);
 
   const surnames = faction === 'army' ? ARMY_SURNAMES : REBEL_SURNAMES;
-  const weaponChoices: WeaponId[] =
-    faction === 'army'
-      ? ['carbine', 'hk416', 'scar_l', 'famas', 'aug', 'm24', 'awm', 'at4', 'carbine', 'bazooka']
-      : ['ak47', 'ak74m', 'fnfal', 'galil', 'sg552', 'sniper', 'vss', 'barrett', 'bazooka', 'ak47'];
-  const primaryWeaponId = weaponChoices[id % weaponChoices.length];
+  const classSpec = getSoldierClass(id);
+  const primaryWeaponId = getClassWeapon(id, faction);
   // Soldiers carrying a flamethrower reserve hold their rifle normally and draw the flamethrower ONLY near an enemy
   const flameBackupId: WeaponId | null =
     id % 4 === 1 ? (faction === 'army' ? 'flamethrower' : 'lpo50') : null;
@@ -1035,8 +1035,8 @@ export function spawnSoldier(
     position: spawnPos.clone(),
     velocity: new THREE.Vector3(),
     yaw: faction === 'army' ? Math.PI : 0,
-    hp: 100,
-    maxHp: 100,
+    hp: classSpec.maxHp,
+    maxHp: classSpec.maxHp,
     alive: true,
     deathTimer: 0,
     fallAngle: 0,
@@ -1058,12 +1058,9 @@ export function spawnSoldier(
     coverPos: null,
     assignedCoverIdx: -1,
     coverStance: 'crouch',
-    tacticalRole:
-      isSniperWeapon(primaryWeaponId) || id % 4 === 0
-        ? 'defender'
-        : id % 4 === 1
-        ? 'flanker'
-        : 'rifleman',
+    tacticalRole: classSpec.tacticalRole,
+    soldierClass: classSpec.id,
+    medicCooldown: 2 + (id % 3),
     flankSign: id % 2 === 0 ? 1 : -1,
     diveTimer: 0,
     proneTimer: 0,
@@ -1386,6 +1383,27 @@ export function updateSoldierAI(
   if (s.diveCooldown > 0) s.diveCooldown -= dt;
   if (s.calloutCooldown > 0) s.calloutCooldown -= dt;
   if (s.commandCooldown > 0) s.commandCooldown -= dt;
+  if (s.soldierClass === 'medic') {
+    s.medicCooldown = Math.max(0, s.medicCooldown - dt);
+    if (s.medicCooldown <= 0) {
+      let patient: SoldierEntity | null = null;
+      let patientDistSq = 18 * 18;
+      for (const ally of allSoldiers) {
+        if (ally === s || !ally.alive || ally.faction !== s.faction || ally.hp >= ally.maxHp) continue;
+        const distSq = ally.position.distanceToSquared(s.position);
+        if (distSq < patientDistSq) {
+          patient = ally;
+          patientDistSq = distSq;
+        }
+      }
+      if (patient) {
+        patient.hp = Math.min(patient.maxHp, patient.hp + 9);
+        s.medicCooldown = 5.5;
+      } else {
+        s.medicCooldown = 1.2;
+      }
+    }
+  }
   if (s.orderTimer > 0) {
     s.orderTimer -= dt;
     if (s.orderTimer <= 0 && s.tacticalOrder !== 'eliminate') {
@@ -2089,12 +2107,15 @@ export function updateSoldierAI(
       const wSpec = WEAPON_SPECS[s.weaponId];
       const rpm = wSpec?.rpm ?? 650;
       const isSuppressWeapon = !isFlm && rpm >= 880;
+      const isSupport = s.soldierClass === 'support';
       if (s.burstRemaining <= 0) {
         s.burstRemaining =
           isSnp || isRkt
             ? 1
             : isFlm
             ? 10
+            : isSupport
+            ? 8 + Math.floor(Math.random() * 5)
             : isElimOrder
             ? isSuppressWeapon
               ? 8
@@ -2111,7 +2132,8 @@ export function updateSoldierAI(
       }
       _aiAimDir.subVectors(bestEnemyPos, _aiMuzzle).normalize();
       const baseSpread = isSnp ? 0.018 : isRkt ? 0.036 : isFlm ? 0.072 : 0.048;
-      const spread = isElimOrder ? baseSpread * 0.62 : baseSpread;
+      const classSpread = s.soldierClass === 'marksman' ? baseSpread * 0.72 : baseSpread;
+      const spread = isElimOrder ? classSpread * 0.62 : classSpread;
       _aiAimDir.x += (Math.random() - 0.5) * spread;
       _aiAimDir.y += (Math.random() - 0.5) * spread * 0.68 + (isRkt ? 0.035 : 0);
       _aiAimDir.z += (Math.random() - 0.5) * spread;
@@ -2137,8 +2159,12 @@ export function updateSoldierAI(
             : 0.34
           : isFlm
           ? 0.42
+          : isSupport
+          ? 0.32 + Math.random() * 0.28
           : isSuppressWeapon
           ? 0.45 + Math.random() * 0.5
+          : s.soldierClass === 'assault'
+          ? 0.42 + Math.random() * 0.32
           : 0.62 + Math.random() * 0.78;
         if (onCallout && s.calloutCooldown <= 0 && Math.random() < 0.25) {
           onCallout(s, 'reload', false);
@@ -2154,6 +2180,9 @@ export function updateSoldierAI(
   while (dYaw < -Math.PI) dYaw += Math.PI * 2;
   s.yaw += dYaw * Math.min(1, dt * (isProne ? 4.2 : 8.5));
   s.root.rotation.y = s.yaw;
+
+  // Class-specific movement profile, followed by injury and terrain penalties.
+  moveSpeed *= SOLDIER_CLASSES[s.soldierClass].movementMultiplier;
 
   // Injury speed reduction (limping soldier moves slower)
   const isInjured = s.hp < 55;

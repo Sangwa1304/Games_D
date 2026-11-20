@@ -6,10 +6,22 @@ import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { WebSocketServer, WebSocket } from 'ws';
+import { distance3, isFiniteNumber, isValidDirection, isValidPlayerState, isVector3, VALID_WEAPONS } from './server/security';
 
 type Faction = 'army' | 'rebels';
 type WeaponId = string;
 type WeatherType = 'clear' | 'mist' | 'rain' | 'storm';
+
+const MAX_WS_PAYLOAD_BYTES = 16 * 1024;
+const MAX_MESSAGES_PER_SECOND = 120;
+const MAX_HIT_DISTANCE = 60;
+const MAX_ROOM_PLAYERS = 16;
+const MAX_CONNECTIONS_PER_IP = 8;
+const MAX_DISCOVERED_UDP_HOSTS = 64;
+const MIN_JOIN_INTERVAL_MS = 1000;
+const RESPAWN_DELAY_MS = 3000;
+const VALID_ORDERS = new Set(['assault', 'eliminate', 'cover', 'move', 'follow']);
+
 type CombatModeId = 'conquest' | 'domination' | 'tdm' | 'assault' | 'cqc' | 'sniper';
 
 const VALID_MODES: CombatModeId[] = ['conquest', 'domination', 'tdm', 'assault', 'cqc', 'sniper'];
@@ -18,6 +30,56 @@ function sanitizeCombatMode(raw: unknown): CombatModeId {
 }
 
 const WEATHER_LIST: WeatherType[] = ['clear', 'mist', 'rain', 'storm'];
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function boundedCount(value: unknown, max: number): number {
+  return isFiniteNumber(value) ? Math.max(0, Math.min(max, Math.floor(value))) : 0;
+}
+
+function sanitizeDiscoveredRooms(raw: unknown, hostIp: string, port: number): RoomSummaryPayload[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.slice(0, 32).flatMap((item): RoomSummaryPayload[] => {
+    if (!isRecord(item) || typeof item.code !== 'string' || !/^[A-Z0-9-]{1,12}$/i.test(item.code)) return [];
+    const weather = WEATHER_LIST.includes(item.weather as WeatherType) ? item.weather as WeatherType : 'clear';
+    const playerNames = Array.isArray(item.playerNames)
+      ? item.playerNames.filter((name): name is string => typeof name === 'string').slice(0, MAX_ROOM_PLAYERS).map((name) => name.slice(0, 18))
+      : [];
+    return [{
+      code: item.code.toUpperCase(),
+      hostName: typeof item.hostName === 'string' ? item.hostName.slice(0, 32) : 'Hôte LAN',
+      playerCount: boundedCount(item.playerCount, MAX_ROOM_PLAYERS),
+      armyCount: boundedCount(item.armyCount, MAX_ROOM_PLAYERS),
+      rebelCount: boundedCount(item.rebelCount, MAX_ROOM_PLAYERS),
+      weather,
+      combatMode: sanitizeCombatMode(item.combatMode),
+      hostIp,
+      port,
+      isRemoteHost: true,
+      playerNames,
+    }];
+  });
+}
+
+function sanitizeDiscoveredPeers(raw: unknown, hostIp: string, port: number): PeerPlayerPayload[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.slice(0, 64).flatMap((item): PeerPlayerPayload[] => {
+    if (!isRecord(item) || typeof item.id !== 'string' || item.id.length < 1 || item.id.length > 64) return [];
+    return [{
+      id: item.id,
+      name: typeof item.name === 'string' ? item.name.slice(0, 18) : 'Soldat',
+      faction: item.faction === 'rebels' ? 'rebels' : 'army',
+      ip: hostIp,
+      status: item.status === 'playing' ? 'playing' : 'lobby',
+      roomCode: typeof item.roomCode === 'string' ? item.roomCode.slice(0, 12) : null,
+      hostIp,
+      port,
+      isRemoteHost: true,
+    }];
+  });
+}
+
 const UDP_DISCOVERY_PORT = Number(process.env.KIVU_UDP_PORT || 41234);
 const UDP_MULTICAST_GROUP = '239.255.77.88';
 const DISCOVERY_MAGIC = 'KIVU_LAN_V1';
@@ -43,6 +105,7 @@ interface RoomPlayer {
   weaponId: WeaponId;
   hp: number;
   alive: boolean;
+  deathAt: number | null;
   isCrouching: boolean;
   isProne: boolean;
   isSprinting: boolean;
@@ -173,6 +236,19 @@ function getUdpBroadcastTargets(): string[] {
 function normalizeRemoteIp(raw: string | undefined): string {
   if (!raw) return '127.0.0.1';
   return raw.startsWith('::ffff:') ? raw.slice(7) : raw;
+}
+
+function isPrivateLanIpv4(ip: string): boolean {
+  const parts = ip.split('.').map(Number);
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return false;
+  const [a, b] = parts;
+  return (
+    a === 10 ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 169 && b === 254) ||
+    a === 127
+  );
 }
 
 function getPrimaryHostIp(): string {
@@ -315,7 +391,18 @@ function pushDiscoveryToAllClients() {
 
 async function startServer() {
   const app = express();
-  app.use(express.json());
+  app.disable('x-powered-by');
+  app.use(express.json({ limit: '16kb', strict: true }));
+  app.use((_req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('X-Frame-Options', 'DENY');
+    next();
+  });
+
+  app.get('/api/health', (_req, res) => {
+    res.json({ status: 'ok', rooms: rooms.size, clients: allClients.size, udpDiscoveryActive });
+  });
 
   app.get('/api/lan-info', (_req, res) => {
     res.json(getCombinedDiscovery());
@@ -327,7 +414,10 @@ async function startServer() {
   });
 
   const server = http.createServer(app);
-  const wss = new WebSocketServer({ server, path: '/ws' });
+  const wss = new WebSocketServer({ server, path: '/ws', maxPayload: MAX_WS_PAYLOAD_BYTES });
+  wss.on('error', (err) => {
+    console.error('WebSocket server error:', err.message);
+  });
 
   // UDP Broadcast + Multicast LAN Auto-Discovery Socket
   const udpSocket = dgram.createSocket({ type: 'udp4', reuseAddr: true });
@@ -367,21 +457,25 @@ async function startServer() {
 
   udpSocket.on('message', (buf, rinfo) => {
     try {
-      const msg = JSON.parse(buf.toString('utf8')) as {
-        magic?: string;
-        kind?: 'beacon' | 'probe';
-        instanceId?: string;
-        port?: number;
-        primaryIp?: string;
-        hostLabel?: string;
-        rooms?: RoomSummaryPayload[];
-        peers?: PeerPlayerPayload[];
-      };
-      if (msg.magic !== DISCOVERY_MAGIC || !msg.instanceId || msg.instanceId === INSTANCE_ID) {
-        return;
-      }
+      if (buf.length > 8192) return;
+      const parsed: unknown = JSON.parse(buf.toString('utf8'));
+      if (!isRecord(parsed)) return;
+      const msg = parsed;
+      if (
+        msg.magic !== DISCOVERY_MAGIC ||
+        typeof msg.instanceId !== 'string' ||
+        !/^[a-zA-Z0-9_-]{1,64}$/.test(msg.instanceId) ||
+        msg.instanceId === INSTANCE_ID ||
+        (msg.kind !== 'beacon' && msg.kind !== 'probe') ||
+        !isFiniteNumber(msg.port) ||
+        !Number.isInteger(msg.port) ||
+        msg.port < 1 ||
+        msg.port > 65535
+      ) return;
 
-      const senderIp = normalizeRemoteIp(rinfo.address) || msg.primaryIp || '127.0.0.1';
+      const senderIp = normalizeRemoteIp(rinfo.address);
+      if (!isPrivateLanIpv4(senderIp)) return;
+      if (!discoveredUdpHosts.has(msg.instanceId) && discoveredUdpHosts.size >= MAX_DISCOVERED_UDP_HOSTS) return;
       if (msg.kind === 'probe') {
         sendUdpPacket('beacon', senderIp);
       }
@@ -390,10 +484,10 @@ async function startServer() {
       const nextHost: DiscoveredUdpHost = {
         instanceId: msg.instanceId,
         ip: senderIp,
-        port: Number(msg.port) || 3000,
-        hostLabel: String(msg.hostLabel || senderIp),
-        rooms: Array.isArray(msg.rooms) ? msg.rooms : [],
-        peers: Array.isArray(msg.peers) ? msg.peers : [],
+        port: msg.port,
+        hostLabel: typeof msg.hostLabel === 'string' ? msg.hostLabel.slice(0, 64) : senderIp,
+        rooms: sanitizeDiscoveredRooms(msg.rooms, senderIp, msg.port),
+        peers: sanitizeDiscoveredPeers(msg.peers, senderIp, msg.port),
         lastSeen: Date.now(),
       };
       const prevSig = prev ? JSON.stringify({ r: prev.rooms, p: prev.peers }) : '';
@@ -447,7 +541,23 @@ async function startServer() {
     const clientSeq = nextClientSeq++;
     const clientId = `p_${Date.now().toString(36)}_${clientSeq}`;
     const clientIp = normalizeRemoteIp(req.socket.remoteAddress);
+    const existingConnectionsFromIp = Array.from(allClients.values()).filter((client) => client.ip === clientIp).length;
+    if (existingConnectionsFromIp >= MAX_CONNECTIONS_PER_IP) {
+      ws.close(1008, 'Connection limit exceeded');
+      return;
+    }
     let currentRoom: LanRoom | null = null;
+    let messageWindowStartedAt = Date.now();
+    let messageCountInWindow = 0;
+    let lastJoinAt = 0;
+    const lastHitAtByTarget = new Map<string, number>();
+    const lastActionAt = new Map<string, number>();
+    const canAct = (action: string, intervalMs: number) => {
+      const previous = lastActionAt.get(action) || 0;
+      if (Date.now() - previous < intervalMs) return false;
+      lastActionAt.set(action, Date.now());
+      return true;
+    };
 
     const lobbyClient: LobbyClient = {
       id: clientId,
@@ -495,6 +605,17 @@ async function startServer() {
     pushDiscoveryToAllClients();
 
     ws.on('message', (raw) => {
+      const now = Date.now();
+      if (now - messageWindowStartedAt >= 1000) {
+        messageWindowStartedAt = now;
+        messageCountInWindow = 0;
+      }
+      messageCountInWindow += 1;
+      if (messageCountInWindow > MAX_MESSAGES_PER_SECOND) {
+        ws.close(1008, 'Rate limit exceeded');
+        return;
+      }
+
       let msg: Record<string, unknown>;
       try {
         msg = JSON.parse(String(raw)) as Record<string, unknown>;
@@ -505,6 +626,7 @@ async function startServer() {
       const type = String(msg.type || '');
 
       if (type === 'lobby:presence') {
+        if (!canAct('presence', 250)) return;
         const nextName =
           typeof msg.name === 'string' && msg.name.trim().length > 0
             ? msg.name.trim().slice(0, 18)
@@ -520,6 +642,7 @@ async function startServer() {
       }
 
       if (type === 'rooms:list' || type === 'lan:scan') {
+        if (!canAct('discovery', 1000)) return;
         sendUdpPacket('probe');
         sendSelf({
           type: 'lan:discovery',
@@ -529,6 +652,11 @@ async function startServer() {
       }
 
       if (type === 'room:join') {
+        if (Date.now() - lastJoinAt < MIN_JOIN_INTERVAL_MS) {
+          sendSelf({ type: 'network:error', code: 'JOIN_RATE_LIMIT', message: 'Réessayez dans un instant.' });
+          return;
+        }
+        lastJoinAt = Date.now();
         leaveCurrentRoom();
         const rawCode = typeof msg.roomCode === 'string' ? msg.roomCode : 'KIVU-LAN';
         const playerName =
@@ -538,6 +666,11 @@ async function startServer() {
         const faction: Faction = msg.faction === 'rebels' ? 'rebels' : 'army';
         const requestedMode = sanitizeCombatMode(msg.combatMode);
         const room = getOrCreateRoom(rawCode, clientId, playerName, requestedMode);
+        if (room.players.size >= MAX_ROOM_PLAYERS) {
+          if (room.players.size === 0) rooms.delete(room.code);
+          sendSelf({ type: 'network:error', code: 'ROOM_FULL', message: 'Cette salle est complète.' });
+          return;
+        }
         currentRoom = room;
 
         lobbyClient.name = playerName;
@@ -563,6 +696,7 @@ async function startServer() {
           weaponId: faction === 'army' ? 'carbine' : 'ak47',
           hp: 100,
           alive: true,
+          deathAt: null,
           isCrouching: false,
           isProne: false,
           isSprinting: false,
@@ -607,15 +741,17 @@ async function startServer() {
       sender.lastSeen = Date.now();
 
       if (type === 'player:state') {
-        sender.x = Number(msg.x) || 0;
-        sender.y = Number(msg.y) || 0;
-        sender.z = Number(msg.z) || 0;
-        sender.yaw = Number(msg.yaw) || 0;
-        sender.pitch = Number(msg.pitch) || 0;
-        sender.vx = Number(msg.vx) || 0;
-        sender.vz = Number(msg.vz) || 0;
-        sender.weaponId = (msg.weaponId as WeaponId) || sender.weaponId;
-        sender.faction = msg.faction === 'rebels' ? 'rebels' : 'army';
+        if (!isValidPlayerState(msg)) return;
+        sender.x = msg.x as number;
+        sender.y = msg.y as number;
+        sender.z = msg.z as number;
+        sender.yaw = msg.yaw as number;
+        sender.pitch = msg.pitch as number;
+        sender.vx = msg.vx as number;
+        sender.vz = msg.vz as number;
+        if (typeof msg.weaponId === 'string' && VALID_WEAPONS.has(msg.weaponId)) {
+          sender.weaponId = msg.weaponId;
+        }
         sender.rankLevel = Math.max(1, Math.min(7, Number(msg.rankLevel) || sender.rankLevel));
         sender.isCrouching = Boolean(msg.isCrouching);
         sender.isProne = Boolean(msg.isProne);
@@ -623,19 +759,16 @@ async function startServer() {
         sender.isTacSprinting = Boolean(msg.isTacSprinting);
         sender.isSliding = Boolean(msg.isSliding);
         sender.isDiving = Boolean(msg.isDiving);
-        if (typeof msg.hp === 'number') {
-          sender.hp = Math.max(0, Math.min(100, msg.hp));
-          sender.alive = sender.hp > 0;
-        }
         return;
       }
 
       if (type === 'player:respawn') {
+        if (sender.alive || sender.deathAt === null || Date.now() - sender.deathAt < RESPAWN_DELAY_MS) {
+          return;
+        }
         sender.hp = 100;
         sender.alive = true;
-        if (msg.faction === 'army' || msg.faction === 'rebels') {
-          sender.faction = msg.faction;
-        }
+        sender.deathAt = null;
         broadcastRoom(
           currentRoom,
           { type: 'player:respawned', id: clientId, faction: sender.faction },
@@ -645,6 +778,15 @@ async function startServer() {
       }
 
       if (type === 'player:shoot') {
+        if (
+          !sender.alive ||
+          !canAct('shoot', 60) ||
+          typeof msg.weaponId !== 'string' ||
+          !VALID_WEAPONS.has(msg.weaponId) ||
+          !isVector3(msg.origin) ||
+          !isValidDirection(msg.dir) ||
+          distance3(msg.origin, sender) > 8
+        ) return;
         broadcastRoom(
           currentRoom,
           {
@@ -661,6 +803,14 @@ async function startServer() {
       }
 
       if (type === 'player:grenade') {
+        if (
+          !sender.alive ||
+          !canAct('grenade', 350) ||
+          !isVector3(msg.pos) ||
+          !isVector3(msg.vel) ||
+          distance3(msg.pos, sender) > 8 ||
+          Math.hypot(msg.vel.x, msg.vel.y, msg.vel.z) > 45
+        ) return;
         broadcastRoom(
           currentRoom,
           {
@@ -677,13 +827,31 @@ async function startServer() {
       }
 
       if (type === 'player:hit') {
-        const targetId = String(msg.targetId || '');
-        const dmg = Math.max(0, Math.min(200, Number(msg.damage) || 0));
-        const isHeadshot = Boolean(msg.isHeadshot);
-        const weaponLabel = String(msg.weaponLabel || 'Tir').slice(0, 24);
+        // Transitional validation: final authority must move to server-side world raycasts.
+        const targetId = typeof msg.targetId === 'string' ? msg.targetId : '';
+        const dmg = isFiniteNumber(msg.damage) ? Math.max(0, Math.min(100, msg.damage)) : 0;
+        if (typeof msg.isHeadshot !== 'boolean') return;
+        if (typeof msg.weaponLabel !== 'string' || msg.weaponLabel.length > 48) return;
+        const isHeadshot = msg.isHeadshot;
+        const weaponLabel = msg.weaponLabel || 'Tir';
         const target = currentRoom.players.get(targetId);
-        if (!target || !target.alive || target.faction === sender.faction) return;
+        const now = Date.now();
+        const lastHitAt = lastHitAtByTarget.get(targetId) || 0;
+        const distance = target
+          ? Math.hypot(target.x - sender.x, target.y - sender.y, target.z - sender.z)
+          : Infinity;
+        if (
+          !sender.alive ||
+          !canAct('hit', 50) ||
+          !target ||
+          !target.alive ||
+          target.faction === sender.faction ||
+          dmg <= 0 ||
+          now - lastHitAt < 100 ||
+          distance > MAX_HIT_DISTANCE
+        ) return;
 
+        lastHitAtByTarget.set(targetId, now);
         target.hp = Math.max(0, target.hp - dmg);
         const targetSocket = currentRoom.sockets.get(targetId);
         if (targetSocket && targetSocket.readyState === WebSocket.OPEN) {
@@ -703,6 +871,7 @@ async function startServer() {
 
         if (target.hp <= 0) {
           target.alive = false;
+          target.deathAt = Date.now();
           target.deaths++;
           sender.kills++;
           if (target.faction === 'army') {
@@ -728,7 +897,15 @@ async function startServer() {
         return;
       }
 
+
       if (type === 'player:order') {
+        if (
+          !sender.alive ||
+          !canAct('order', 500) ||
+          typeof msg.order !== 'string' ||
+          !VALID_ORDERS.has(msg.order) ||
+          !isVector3(msg.target)
+        ) return;
         broadcastRoom(
           currentRoom,
           {
@@ -742,6 +919,10 @@ async function startServer() {
           clientId
         );
       }
+    });
+
+    ws.on('error', (err) => {
+      console.warn(`WebSocket client error (${clientId}):`, err.message);
     });
 
     ws.on('close', () => {

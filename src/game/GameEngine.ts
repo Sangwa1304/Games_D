@@ -39,6 +39,7 @@ import {
 import { LanMultiplayerClient } from './network';
 import { getCombatModeSpec } from './modes';
 import { EnvironmentParticleSystem } from './particles';
+import { getNearMissSuppression, getPlayerSuppressionIntensity } from './suppression';
 import {
   hasDroneOpticLos,
   hasLineOfSight,
@@ -157,6 +158,7 @@ interface BulletProjectile {
   shooterKey: string | null;
   shooterName: string;
   ignoreIds: Set<string>;
+  suppressedIds: Set<number>;
   mesh: THREE.Mesh;
 }
 
@@ -809,6 +811,7 @@ export class GameEngine {
         shooterKey: null,
         shooterName: 'Soldat',
         ignoreIds: new Set(),
+        suppressedIds: new Set(),
         mesh,
       });
     }
@@ -2822,6 +2825,7 @@ export class GameEngine {
     b.shooterName =
       shooterName || (faction === 'army' ? 'Soldat Armée' : 'Combattant Rebelle');
     b.ignoreIds.clear();
+    b.suppressedIds.clear();
     b.mesh.position.copy(origin);
     b.mesh.lookAt(origin.x + dir.x, origin.y + dir.y, origin.z + dir.z);
     b.mesh.visible = true;
@@ -3578,9 +3582,30 @@ export class GameEngine {
         if (!b.whizTriggered && dSegPlayer < 4.5) {
           b.whizTriggered = true;
           this.pushShotIndicator(b.shooterOrigin, false, b.shooterKey);
+          const suppression = getPlayerSuppressionIntensity(dSegPlayer);
+          if (suppression > 0) {
+            // A close flyby briefly unsettles aim and adds a restrained camera jolt.
+            // This is feedback only: it never changes health or movement authority.
+            this.cameraShake = Math.max(this.cameraShake, suppression * 0.19);
+            this.spreadBloom = Math.min(0.03, this.spreadBloom + suppression * 0.006);
+          }
           if (dSegPlayer < 2.8) {
             this.audio.playBulletWhiz();
           }
+        }
+      }
+
+      // Near misses suppress enemy AI even when the round does not hit.
+      // Each projectile can trigger one reaction per soldier, not every frame.
+      for (let j = 0; j < this.soldiers.length; j++) {
+        const soldier = this.soldiers[j];
+        if (!soldier.alive || soldier.faction === b.faction || b.suppressedIds.has(soldier.id)) continue;
+        const isLow = soldier.stance === 'prone' || soldier.diveTimer > 0 || soldier.proneTimer > 0;
+        _tmpVec.set(soldier.position.x, soldier.position.y + (isLow ? 0.38 : soldier.isCrouching ? 0.95 : 1.25), soldier.position.z);
+        const nearMissDistance = this.pointToSegmentDist(_tmpVec, b.prevPos, b.pos);
+        if (nearMissDistance < 4.5) {
+          soldier.underFireTimer = Math.max(soldier.underFireTimer, getNearMissSuppression(nearMissDistance));
+          b.suppressedIds.add(soldier.id);
         }
       }
 
