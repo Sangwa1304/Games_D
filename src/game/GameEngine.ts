@@ -39,7 +39,7 @@ import {
 import { LanMultiplayerClient } from './network';
 import { getCombatModeSpec } from './modes';
 import { EnvironmentParticleSystem } from './particles';
-import { getNearMissSuppression } from './suppression';
+import { getNearMissSuppression, getPlayerSuppressionIntensity } from './suppression';
 import {
   hasDroneOpticLos,
   hasLineOfSight,
@@ -3582,6 +3582,13 @@ export class GameEngine {
         if (!b.whizTriggered && dSegPlayer < 4.5) {
           b.whizTriggered = true;
           this.pushShotIndicator(b.shooterOrigin, false, b.shooterKey);
+          const suppression = getPlayerSuppressionIntensity(dSegPlayer);
+          if (suppression > 0) {
+            // A close flyby briefly unsettles aim and adds a restrained camera jolt.
+            // This is feedback only: it never changes health or movement authority.
+            this.cameraShake = Math.max(this.cameraShake, suppression * 0.19);
+            this.spreadBloom = Math.min(0.03, this.spreadBloom + suppression * 0.006);
+          }
           if (dSegPlayer < 2.8) {
             this.audio.playBulletWhiz();
           }
