@@ -32,6 +32,18 @@ This roadmap tracks the hardening work for the Kivu LAN multiplayer server.
 6. Expand automated coverage to full WebSocket integration tests for forged state, respawn abuse, friendly fire, room limits, and combat rate limits.
 7. Add observability for rejected packets, disconnect reasons, room lifecycle, and server tick health.
 
+## Recommended server-authoritative migration
+
+The next phase should be implemented in this order to avoid breaking LAN compatibility:
+
+1. **Version the protocol.** Add a protocol version to room join and reject incompatible clients with a clear error.
+2. **Make spawn authoritative.** Return the server-selected spawn transform in `room:joined` and apply it to the local player before the first state update. The current client join callback does not apply the server's spawn coordinates, so movement authority cannot be switched on safely yet.
+3. **Replace pose uploads with input intents.** Clients send bounded movement inputs and aim intent; the server advances movement at a fixed tick and publishes authoritative snapshots. Add client prediction/reconciliation only after the server pose is stable.
+4. **Share static collision data.** Extract deterministic collider definitions from the world builder into a representation usable by both the browser and Node server. Do not try to run the Three.js rendering scene on the server.
+5. **Authorize weapons and shots.** Store server-side loadouts, ammo, reload state, and weapon fire intervals. A fire request should contain intent only; the server derives the muzzle origin from the authoritative player pose and performs ray/capsule and line-of-sight tests.
+6. **Simulate explosives on the server.** Own grenade trajectories, fuse timing, blast radius, and damage server-side. Remove the client-reported `player:hit` path once equivalent authoritative explosion and flame damage exists.
+7. **Retire compatibility paths.** After supported clients have migrated, reject legacy `player:state` and `player:hit` messages rather than keeping two competing authorities.
+
 ## Operational notes
 
 The current hardening is a compatibility-preserving baseline. Shot and grenade packets are now structurally checked and rate-limited, but hit registration and movement are still client-influenced. The server does not yet simulate weapon cadence/ammunition, line of sight, projectile collisions, or player movement. Do not advertise the current LAN mode as cheat-proof.
