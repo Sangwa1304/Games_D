@@ -18,6 +18,7 @@ This roadmap tracks the hardening work for the Kivu LAN multiplayer server.
 - Validate and cap incoming UDP discovery beacons, including room/peer counts, names, identifiers, and ports; restrict discovery to private LAN peers and cap the discovered-host cache.
 - Bound JSON request bodies, add baseline HTTP security headers, and expose a lightweight health endpoint.
 - Handle WebSocket server/client transport errors explicitly and log them without leaving unhandled error events.
+- Throttle lobby-presence updates and LAN discovery scans to prevent probe/broadcast flooding.
 
 ## Remaining work (required before public competitive multiplayer)
 
