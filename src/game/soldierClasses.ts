@@ -63,7 +63,7 @@ export const SOLDIER_CLASSES: Record<SoldierClassId, SoldierClassSpec> = {
 const CLASS_ORDER: SoldierClassId[] = ['assault', 'support', 'marksman', 'antiArmor', 'medic'];
 
 export function getSoldierClass(id: number): SoldierClassSpec {
-  const safeId = Number.isFinite(id) ? Math.abs(Math.trunc(id)) : 0;
+  const safeId = Number.isFinite(id) ? Math.max(0, Math.trunc(id)) : 0;
   return SOLDIER_CLASSES[CLASS_ORDER[safeId % CLASS_ORDER.length]];
 }
 
