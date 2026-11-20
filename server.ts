@@ -469,7 +469,7 @@ async function startServer() {
     let currentRoom: LanRoom | null = null;
     let messageWindowStartedAt = Date.now();
     let messageCountInWindow = 0;
-    let lastHitAt = 0;
+    const lastHitAtByTarget = new Map<string, number>();
 
     const lobbyClient: LobbyClient = {
       id: clientId,
@@ -710,53 +710,29 @@ async function startServer() {
       }
 
       if (type === 'player:hit') {
-        // Transitional validation: until server-side world raycasts are implemented,
-        // reject impossible hit claims and enforce a conservative per-client hit rate.
+        // Transitional validation: final authority must move to server-side world raycasts.
         const targetId = typeof msg.targetId === 'string' ? msg.targetId : '';
         const dmg = isFiniteNumber(msg.damage) ? Math.max(0, Math.min(100, msg.damage)) : 0;
         const isHeadshot = Boolean(msg.isHeadshot);
         const weaponLabel = String(msg.weaponLabel || 'Tir').slice(0, 24);
         const target = currentRoom.players.get(targetId);
-        const origin = msg.origin as { x?: unknown; y?: unknown; z?: unknown } | undefined;
-        const direction = msg.dir as { x?: unknown; y?: unknown; z?: unknown } | undefined;
+        const now = Date.now();
+        const lastHitAt = lastHitAtByTarget.get(targetId) || 0;
+        const distance = target
+          ? Math.hypot(target.x - sender.x, target.y - sender.y, target.z - sender.z)
+          : Infinity;
         if (
           !sender.alive ||
           !target ||
           !target.alive ||
           target.faction === sender.faction ||
           dmg <= 0 ||
-          Date.now() - lastHitAt < 80 ||
-          !origin ||
-          !direction ||
-          !isFiniteNumber(origin.x) ||
-          !isFiniteNumber(origin.y) ||
-          !isFiniteNumber(origin.z) ||
-          !isFiniteNumber(direction.x) ||
-          !isFiniteNumber(direction.y) ||
-          !isFiniteNumber(direction.z)
+          now - lastHitAt < 100 ||
+          distance > 250
         ) return;
 
-        const originOffsetX = (origin.x as number) - sender.x;
-        const originOffsetY = (origin.y as number) - sender.y;
-        const originOffsetZ = (origin.z as number) - sender.z;
-        const targetOffsetX = target.x - (origin.x as number);
-        const targetOffsetY = target.y - (origin.y as number);
-        const targetOffsetZ = target.z - (origin.z as number);
-        const targetDistance = Math.hypot(targetOffsetX, targetOffsetY, targetOffsetZ);
-        const directionLength = Math.hypot(direction.x as number, direction.y as number, direction.z as number);
-        const alignment = targetDistance > 0 && directionLength > 0
-          ? ((targetOffsetX * (direction.x as number) + targetOffsetY * (direction.y as number) + targetOffsetZ * (direction.z as number)) /
-              (targetDistance * directionLength))
-          : -1;
-        if (
-          Math.hypot(originOffsetX, originOffsetY, originOffsetZ) > 8 ||
-          targetDistance > 250 ||
-          alignment < 0.97
-        ) return;
-
-        lastHitAt = Date.now();
-        target.hp = Math.max(0, target.hp - dmg);
-        const targetSocket = currentRoom.sockets.get(targetId);
+        lastHitAtByTarget.set(targetId, now);
+        target.hp = Math.max(0, target.hp - dmg);        const targetSocket = currentRoom.sockets.get(targetId);
         if (targetSocket && targetSocket.readyState === WebSocket.OPEN) {
           targetSocket.send(
             JSON.stringify({
@@ -799,6 +775,7 @@ async function startServer() {
         }
         return;
       }
+
 
       if (type === 'player:order') {
         broadcastRoom(
