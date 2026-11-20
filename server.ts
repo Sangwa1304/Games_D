@@ -14,7 +14,32 @@ type WeatherType = 'clear' | 'mist' | 'rain' | 'storm';
 const MAX_WS_PAYLOAD_BYTES = 16 * 1024;
 const MAX_MESSAGES_PER_SECOND = 120;
 const MAX_WORLD_COORDINATE = 10000;
+const MAX_ROOM_PLAYERS = 16;
+const MAX_CONNECTIONS_PER_IP = 8;
+const MIN_JOIN_INTERVAL_MS = 1000;
 const RESPAWN_DELAY_MS = 3000;
+const VALID_WEAPONS = new Set([
+  'ak47', 'carbine', 'ak74m', 'fnfal', 'scar_l', 'hk416', 'famas', 'aug', 'galil', 'sg552',
+  'sniper', 'm24', 'awm', 'barrett', 'mk20', 'vss', 'bazooka', 'at4', 'flamethrower', 'lpo50',
+]);
+
+function isVector3(value: unknown): value is { x: number; y: number; z: number } {
+  if (!value || typeof value !== 'object') return false;
+  const vector = value as Record<string, unknown>;
+  return ['x', 'y', 'z'].every((key) =>
+    isFiniteNumber(vector[key]) && Math.abs(vector[key] as number) <= MAX_WORLD_COORDINATE
+  );
+}
+
+function isValidDirection(value: unknown): value is { x: number; y: number; z: number } {
+  if (!isVector3(value)) return false;
+  const length = Math.hypot(value.x, value.y, value.z);
+  return length >= 0.95 && length <= 1.05;
+}
+
+function distance3(a: { x: number; y: number; z: number }, b: { x: number; y: number; z: number }) {
+  return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
+}
 
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value);
@@ -469,7 +494,15 @@ async function startServer() {
     let currentRoom: LanRoom | null = null;
     let messageWindowStartedAt = Date.now();
     let messageCountInWindow = 0;
+    let lastJoinAt = 0;
     const lastHitAtByTarget = new Map<string, number>();
+    const lastActionAt = new Map<string, number>();
+    const canAct = (action: string, intervalMs: number) => {
+      const previous = lastActionAt.get(action) || 0;
+      if (Date.now() - previous < intervalMs) return false;
+      lastActionAt.set(action, Date.now());
+      return true;
+    };
 
     const lobbyClient: LobbyClient = {
       id: clientId,
@@ -562,6 +595,16 @@ async function startServer() {
       }
 
       if (type === 'room:join') {
+        if (Date.now() - lastJoinAt < MIN_JOIN_INTERVAL_MS) {
+          sendSelf({ type: 'network:error', code: 'JOIN_RATE_LIMIT', message: 'Réessayez dans un instant.' });
+          return;
+        }
+        const activeConnectionsFromIp = Array.from(allClients.values()).filter((client) => client.ip === clientIp).length;
+        if (activeConnectionsFromIp > MAX_CONNECTIONS_PER_IP) {
+          sendSelf({ type: 'network:error', code: 'IP_CONNECTION_LIMIT', message: 'Trop de connexions depuis cette adresse.' });
+          return;
+        }
+        lastJoinAt = Date.now();
         leaveCurrentRoom();
         const rawCode = typeof msg.roomCode === 'string' ? msg.roomCode : 'KIVU-LAN';
         const playerName =
@@ -571,6 +614,11 @@ async function startServer() {
         const faction: Faction = msg.faction === 'rebels' ? 'rebels' : 'army';
         const requestedMode = sanitizeCombatMode(msg.combatMode);
         const room = getOrCreateRoom(rawCode, clientId, playerName, requestedMode);
+        if (room.players.size >= MAX_ROOM_PLAYERS) {
+          if (room.players.size === 0) rooms.delete(room.code);
+          sendSelf({ type: 'network:error', code: 'ROOM_FULL', message: 'Cette salle est complète.' });
+          return;
+        }
         currentRoom = room;
 
         lobbyClient.name = playerName;
@@ -649,7 +697,7 @@ async function startServer() {
         sender.pitch = msg.pitch as number;
         sender.vx = msg.vx as number;
         sender.vz = msg.vz as number;
-        if (typeof msg.weaponId === 'string' && msg.weaponId.length <= 40) {
+        if (typeof msg.weaponId === 'string' && VALID_WEAPONS.has(msg.weaponId)) {
           sender.weaponId = msg.weaponId;
         }
         sender.rankLevel = Math.max(1, Math.min(7, Number(msg.rankLevel) || sender.rankLevel));
@@ -678,6 +726,15 @@ async function startServer() {
       }
 
       if (type === 'player:shoot') {
+        if (
+          !sender.alive ||
+          !canAct('shoot', 60) ||
+          typeof msg.weaponId !== 'string' ||
+          !VALID_WEAPONS.has(msg.weaponId) ||
+          !isVector3(msg.origin) ||
+          !isValidDirection(msg.dir) ||
+          distance3(msg.origin, sender) > 8
+        ) return;
         broadcastRoom(
           currentRoom,
           {
@@ -694,6 +751,14 @@ async function startServer() {
       }
 
       if (type === 'player:grenade') {
+        if (
+          !sender.alive ||
+          !canAct('grenade', 350) ||
+          !isVector3(msg.pos) ||
+          !isVector3(msg.vel) ||
+          distance3(msg.pos, sender) > 8 ||
+          Math.hypot(msg.vel.x, msg.vel.y, msg.vel.z) > 45
+        ) return;
         broadcastRoom(
           currentRoom,
           {
@@ -779,6 +844,13 @@ async function startServer() {
 
 
       if (type === 'player:order') {
+        if (
+          !sender.alive ||
+          !canAct('order', 500) ||
+          typeof msg.order !== 'string' ||
+          msg.order.length > 32 ||
+          !isVector3(msg.target)
+        ) return;
         broadcastRoom(
           currentRoom,
           {
