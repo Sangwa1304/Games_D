@@ -30,6 +30,7 @@ import {
   WeaponId,
 } from './types';
 import { WEAPON_SPECS, isFlameWeapon, isRocketWeapon, isSniperWeapon } from './weapons';
+import { getClassWeapon, getSoldierClass, SoldierClassId } from './soldierClasses';
 
 export interface RemoteCombatTarget {
   key: string;
@@ -82,6 +83,8 @@ export interface SoldierEntity {
   assignedCoverIdx: number;
   coverStance: 'crouch' | 'prone';
   tacticalRole: 'rifleman' | 'defender' | 'flanker';
+  soldierClass: SoldierClassId;
+  medicCooldown: number;
   flankSign: 1 | -1;
   diveTimer: number;
   proneTimer: number;
@@ -962,11 +965,8 @@ export function spawnSoldier(
   const rankDef = getRankDef(faction, rankLevel);
 
   const surnames = faction === 'army' ? ARMY_SURNAMES : REBEL_SURNAMES;
-  const weaponChoices: WeaponId[] =
-    faction === 'army'
-      ? ['carbine', 'hk416', 'scar_l', 'famas', 'aug', 'm24', 'awm', 'at4', 'carbine', 'bazooka']
-      : ['ak47', 'ak74m', 'fnfal', 'galil', 'sg552', 'sniper', 'vss', 'barrett', 'bazooka', 'ak47'];
-  const primaryWeaponId = weaponChoices[id % weaponChoices.length];
+  const classSpec = getSoldierClass(id);
+  const primaryWeaponId = getClassWeapon(id, faction);
   // Soldiers carrying a flamethrower reserve hold their rifle normally and draw the flamethrower ONLY near an enemy
   const flameBackupId: WeaponId | null =
     id % 4 === 1 ? (faction === 'army' ? 'flamethrower' : 'lpo50') : null;
@@ -1035,8 +1035,8 @@ export function spawnSoldier(
     position: spawnPos.clone(),
     velocity: new THREE.Vector3(),
     yaw: faction === 'army' ? Math.PI : 0,
-    hp: 100,
-    maxHp: 100,
+    hp: classSpec.maxHp,
+    maxHp: classSpec.maxHp,
     alive: true,
     deathTimer: 0,
     fallAngle: 0,
@@ -1058,12 +1058,9 @@ export function spawnSoldier(
     coverPos: null,
     assignedCoverIdx: -1,
     coverStance: 'crouch',
-    tacticalRole:
-      isSniperWeapon(primaryWeaponId) || id % 4 === 0
-        ? 'defender'
-        : id % 4 === 1
-        ? 'flanker'
-        : 'rifleman',
+    tacticalRole: classSpec.tacticalRole,
+    soldierClass: classSpec.id,
+    medicCooldown: 2 + (id % 3),
     flankSign: id % 2 === 0 ? 1 : -1,
     diveTimer: 0,
     proneTimer: 0,
